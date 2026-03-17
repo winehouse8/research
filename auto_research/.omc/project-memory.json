@@ -1,0 +1,344 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1773765652942,
+  "projectRoot": "/Users/jaewoo/Desktop/Project/research/auto_research",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Python",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "requirements.txt"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": "pip",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs",
+      "spec",
+      "tests"
+    ],
+    "gitBranches": {
+      "defaultBranch": "master",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "__pycache__": {
+      "path": "__pycache__",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1773765652930,
+      "keyFiles": [
+        "__init__.cpython-313.pyc",
+        "autoresearch_v2.cpython-313.pyc"
+      ]
+    },
+    "agents": {
+      "path": "agents",
+      "purpose": null,
+      "fileCount": 5,
+      "lastAccessed": 1773765652931,
+      "keyFiles": [
+        "__init__.py",
+        "_sdk.py",
+        "compare_agent.py",
+        "reflector_agent.py",
+        "research_agent.py"
+      ]
+    },
+    "autoresearch": {
+      "path": "autoresearch",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1773765652931,
+      "keyFiles": []
+    },
+    "core": {
+      "path": "core",
+      "purpose": null,
+      "fileCount": 4,
+      "lastAccessed": 1773765652932,
+      "keyFiles": [
+        "__init__.py",
+        "fitness.py",
+        "memory.py",
+        "schema.sql"
+      ]
+    },
+    "db": {
+      "path": "db",
+      "purpose": null,
+      "fileCount": 4,
+      "lastAccessed": 1773765652932,
+      "keyFiles": [
+        "knowledge.db",
+        "knowledge.db-shm",
+        "knowledge.db-wal"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 12,
+      "lastAccessed": 1773765652932,
+      "keyFiles": [
+        "260317_agent-ecosystem-minimal-v2.md",
+        "260317_agent-ecosystem-minimal.md",
+        "260317_agent-science-community.md",
+        "260317_autoresearch-agent-sdk.md",
+        "260317_final-strategy-report.md"
+      ]
+    },
+    "logs": {
+      "path": "logs",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1773765652932,
+      "keyFiles": [
+        "research.log"
+      ]
+    },
+    "spec": {
+      "path": "spec",
+      "purpose": "Test specifications",
+      "fileCount": 1,
+      "lastAccessed": 1773765652932,
+      "keyFiles": [
+        "summary.md"
+      ]
+    },
+    "tests": {
+      "path": "tests",
+      "purpose": "Test files",
+      "fileCount": 2,
+      "lastAccessed": 1773765652933,
+      "keyFiles": [
+        "__init__.py",
+        "test_integration.py"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "spec/04-main-loop/lifecycle.md",
+      "accessCount": 10,
+      "lastAccessed": 1773767777557,
+      "type": "file"
+    },
+    {
+      "path": "spec/01-architecture/overview.md",
+      "accessCount": 9,
+      "lastAccessed": 1773767727566,
+      "type": "file"
+    },
+    {
+      "path": "spec/01-architecture/tech-stack.md",
+      "accessCount": 8,
+      "lastAccessed": 1773767783661,
+      "type": "file"
+    },
+    {
+      "path": "spec/01-architecture/principles.md",
+      "accessCount": 5,
+      "lastAccessed": 1773766177770,
+      "type": "file"
+    },
+    {
+      "path": "spec/03-agents/research-agent.md",
+      "accessCount": 5,
+      "lastAccessed": 1773767725458,
+      "type": "file"
+    },
+    {
+      "path": "spec/03-agents/compare-agent.md",
+      "accessCount": 5,
+      "lastAccessed": 1773767727174,
+      "type": "file"
+    },
+    {
+      "path": "spec/03-agents/reflector-agent.md",
+      "accessCount": 5,
+      "lastAccessed": 1773767727348,
+      "type": "file"
+    },
+    {
+      "path": "autoresearch_v2.py",
+      "accessCount": 5,
+      "lastAccessed": 1773768239181,
+      "type": "file"
+    },
+    {
+      "path": "agents/_sdk.py",
+      "accessCount": 5,
+      "lastAccessed": 1773768239546,
+      "type": "file"
+    },
+    {
+      "path": "agents/research_agent.py",
+      "accessCount": 5,
+      "lastAccessed": 1773768240013,
+      "type": "file"
+    },
+    {
+      "path": "agents/compare_agent.py",
+      "accessCount": 5,
+      "lastAccessed": 1773768240499,
+      "type": "file"
+    },
+    {
+      "path": "agents/reflector_agent.py",
+      "accessCount": 5,
+      "lastAccessed": 1773768240919,
+      "type": "file"
+    },
+    {
+      "path": "core/memory.py",
+      "accessCount": 4,
+      "lastAccessed": 1773768241485,
+      "type": "file"
+    },
+    {
+      "path": "core/fitness.py",
+      "accessCount": 4,
+      "lastAccessed": 1773768241838,
+      "type": "file"
+    },
+    {
+      "path": "core/schema.sql",
+      "accessCount": 4,
+      "lastAccessed": 1773768242869,
+      "type": "file"
+    },
+    {
+      "path": "requirements.txt",
+      "accessCount": 4,
+      "lastAccessed": 1773768243667,
+      "type": "file"
+    },
+    {
+      "path": "spec/summary.md",
+      "accessCount": 4,
+      "lastAccessed": 1773768275705,
+      "type": "file"
+    },
+    {
+      "path": "spec/04-main-loop/cold-start.md",
+      "accessCount": 3,
+      "lastAccessed": 1773766174736,
+      "type": "file"
+    },
+    {
+      "path": "spec/05-evolution/diversity.md",
+      "accessCount": 3,
+      "lastAccessed": 1773766178246,
+      "type": "file"
+    },
+    {
+      "path": "spec/03-agents/sdk-integration.md",
+      "accessCount": 3,
+      "lastAccessed": 1773767724986,
+      "type": "file"
+    },
+    {
+      "path": "core/__init__.py",
+      "accessCount": 3,
+      "lastAccessed": 1773768242297,
+      "type": "file"
+    },
+    {
+      "path": "seed_data.py",
+      "accessCount": 3,
+      "lastAccessed": 1773768243225,
+      "type": "file"
+    },
+    {
+      "path": "spec/05-evolution/epistemology.md",
+      "accessCount": 2,
+      "lastAccessed": 1773766099226,
+      "type": "file"
+    },
+    {
+      "path": "spec/03-agents/summary.md",
+      "accessCount": 2,
+      "lastAccessed": 1773767693476,
+      "type": "file"
+    },
+    {
+      "path": "spec/04-main-loop/summary.md",
+      "accessCount": 2,
+      "lastAccessed": 1773767698735,
+      "type": "file"
+    },
+    {
+      "path": "spec/01-architecture/summary.md",
+      "accessCount": 1,
+      "lastAccessed": 1773765726420,
+      "type": "file"
+    },
+    {
+      "path": "spec/02-core/fitness-system.md",
+      "accessCount": 1,
+      "lastAccessed": 1773765726809,
+      "type": "file"
+    },
+    {
+      "path": "spec/02-core/memory-system.md",
+      "accessCount": 1,
+      "lastAccessed": 1773765727204,
+      "type": "file"
+    },
+    {
+      "path": "spec/02-core/schema.md",
+      "accessCount": 1,
+      "lastAccessed": 1773765727718,
+      "type": "file"
+    },
+    {
+      "path": "spec/02-core/summary.md",
+      "accessCount": 1,
+      "lastAccessed": 1773765728363,
+      "type": "file"
+    },
+    {
+      "path": "spec/05-evolution/selection-pressure.md",
+      "accessCount": 1,
+      "lastAccessed": 1773765734988,
+      "type": "file"
+    },
+    {
+      "path": "spec/05-evolution/summary.md",
+      "accessCount": 1,
+      "lastAccessed": 1773765735850,
+      "type": "file"
+    },
+    {
+      "path": "tests/test_integration.py",
+      "accessCount": 1,
+      "lastAccessed": 1773768243679,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

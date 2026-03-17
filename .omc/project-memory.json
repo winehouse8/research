@@ -1,0 +1,248 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1773760159635,
+  "projectRoot": "/Users/jaewoo/Desktop/Project/research",
+  "techStack": {
+    "languages": [],
+    "frameworks": [],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [],
+    "gitBranches": {
+      "defaultBranch": "master",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "260317_computer_in_llm": {
+      "path": "260317_computer_in_llm",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1773760159622,
+      "keyFiles": []
+    },
+    "auto_research": {
+      "path": "auto_research",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1773760159622,
+      "keyFiles": [
+        "__init__.py",
+        "requirements.txt"
+      ]
+    },
+    "claude_agend_sdk": {
+      "path": "claude_agend_sdk",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1773760159622,
+      "keyFiles": []
+    },
+    "investment": {
+      "path": "investment",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1773760159622,
+      "keyFiles": []
+    },
+    "auto_research/docs": {
+      "path": "auto_research/docs",
+      "purpose": "Documentation",
+      "fileCount": 11,
+      "lastAccessed": 1773760159622,
+      "keyFiles": [
+        "260317_agent-ecosystem-minimal-v2.md",
+        "260317_agent-ecosystem-minimal.md",
+        "260317_agent-science-community.md"
+      ]
+    },
+    "auto_research/tests": {
+      "path": "auto_research/tests",
+      "purpose": "Test files",
+      "fileCount": 1,
+      "lastAccessed": 1773760159623,
+      "keyFiles": [
+        "__init__.py"
+      ]
+    },
+    "claude_agend_sdk/docs": {
+      "path": "claude_agend_sdk/docs",
+      "purpose": "Documentation",
+      "fileCount": 18,
+      "lastAccessed": 1773760159623,
+      "keyFiles": [
+        "260309_focused_4model_agentic_coding.md",
+        "260309_llm_comparison_24gb_agentic_coding.md",
+        "260311_jira_github_cicd_certification_automation.md"
+      ]
+    },
+    "investment/docs": {
+      "path": "investment/docs",
+      "purpose": "Documentation",
+      "fileCount": 1,
+      "lastAccessed": 1773760159623,
+      "keyFiles": [
+        "ai_agent_bottleneck_report.md"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "auto_research/autoresearch_v2.py",
+      "accessCount": 35,
+      "lastAccessed": 1773767535367,
+      "type": "file"
+    },
+    {
+      "path": "auto_research/agents/compare_agent.py",
+      "accessCount": 22,
+      "lastAccessed": 1773767690047,
+      "type": "file"
+    },
+    {
+      "path": "auto_research/agents/research_agent.py",
+      "accessCount": 18,
+      "lastAccessed": 1773767671440,
+      "type": "file"
+    },
+    {
+      "path": "auto_research/agents/reflector_agent.py",
+      "accessCount": 18,
+      "lastAccessed": 1773767692977,
+      "type": "file"
+    },
+    {
+      "path": "auto_research/core/fitness.py",
+      "accessCount": 15,
+      "lastAccessed": 1773763506563,
+      "type": "file"
+    },
+    {
+      "path": "auto_research",
+      "accessCount": 10,
+      "lastAccessed": 1773765081515,
+      "type": "directory"
+    },
+    {
+      "path": "auto_research/requirements.txt",
+      "accessCount": 9,
+      "lastAccessed": 1773763333405,
+      "type": "file"
+    },
+    {
+      "path": "auto_research/core/memory.py",
+      "accessCount": 9,
+      "lastAccessed": 1773765088195,
+      "type": "file"
+    },
+    {
+      "path": "auto_research/docs/260318_external-project-analysis.md",
+      "accessCount": 5,
+      "lastAccessed": 1773760915910,
+      "type": "file"
+    },
+    {
+      "path": "auto_research/tests/test_integration.py",
+      "accessCount": 5,
+      "lastAccessed": 1773763332973,
+      "type": "file"
+    },
+    {
+      "path": "auto_research/seed_data.py",
+      "accessCount": 4,
+      "lastAccessed": 1773763332564,
+      "type": "file"
+    },
+    {
+      "path": "auto_research/docs/260317_final-strategy-report.md",
+      "accessCount": 4,
+      "lastAccessed": 1773763333756,
+      "type": "file"
+    },
+    {
+      "path": "auto_research/README.md",
+      "accessCount": 4,
+      "lastAccessed": 1773765069409,
+      "type": "file"
+    },
+    {
+      "path": "auto_research/agents/_sdk.py",
+      "accessCount": 4,
+      "lastAccessed": 1773766882580,
+      "type": "file"
+    },
+    {
+      "path": "",
+      "accessCount": 3,
+      "lastAccessed": 1773762003863,
+      "type": "directory"
+    },
+    {
+      "path": "auto_research/core/schema.sql",
+      "accessCount": 3,
+      "lastAccessed": 1773763331340,
+      "type": "file"
+    },
+    {
+      "path": "claude_agend_sdk",
+      "accessCount": 2,
+      "lastAccessed": 1773761872941,
+      "type": "directory"
+    },
+    {
+      "path": "auto_research/docs/260317_high-quality-research-input.md",
+      "accessCount": 2,
+      "lastAccessed": 1773762017233,
+      "type": "directory"
+    },
+    {
+      "path": "auto_research/core/__init__.py",
+      "accessCount": 2,
+      "lastAccessed": 1773763331288,
+      "type": "file"
+    },
+    {
+      "path": "auto_research/agents",
+      "accessCount": 2,
+      "lastAccessed": 1773766836458,
+      "type": "directory"
+    },
+    {
+      "path": "auto_research/agents/__init__.py",
+      "accessCount": 1,
+      "lastAccessed": 1773763348111,
+      "type": "file"
+    },
+    {
+      "path": "auto_research/spec/01-architecture/principles.md",
+      "accessCount": 1,
+      "lastAccessed": 1773765069916,
+      "type": "file"
+    },
+    {
+      "path": "auto_research/spec/05-evolution/epistemology.md",
+      "accessCount": 1,
+      "lastAccessed": 1773765070205,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

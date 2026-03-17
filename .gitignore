@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# SQLite runtime DB
+auto_research/db/knowledge.db
+auto_research/db/knowledge.db-wal
+auto_research/db/knowledge.db-shm
+
+# Runtime logs (keep .gitkeep)
+auto_research/logs/*.log
+
+# OMC state (ephemeral)
+.omc/state/
+.omc/sessions/
+.omc/.omc_backup/
+auto_research/.omc/state/
+auto_research/.omc/sessions/
+
+# pytest
+.pytest_cache/
+auto_research/.pytest_cache/
