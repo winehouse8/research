@@ -1,0 +1,12 @@
+{
+  "active": false,
+  "mode": "ralplan",
+  "iteration": 1,
+  "max_iterations": 5,
+  "plan_path": "/home/jovyan/deephunter-data-volumes/research/claude_agend_sdk/.omc/plans/itda-semiconductor-swot.md",
+  "current_phase": "complete",
+  "started_at": "2026-02-27T00:00:00.000Z",
+  "completed_at": "2026-02-27T00:00:00.000Z",
+  "critic_verdict": "OKAY",
+  "task_description": "잇다반도체 스타트업 SWOT 분석 보고서"
+}

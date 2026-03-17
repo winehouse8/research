@@ -1,0 +1,153 @@
+# CODEOWNERS — Safety-Critical Software Repository
+#
+# This file defines who must review changes to each path before a pull request
+# can be merged. GitHub enforces these rules when "Require review from Code Owners"
+# is enabled in branch protection settings.
+#
+# Syntax:
+#   <path-pattern>  <owner> [<owner> ...]
+#
+# Owners can be GitHub usernames (@username), team slugs (@org/team-name), or
+# email addresses. Teams must have read access to the repository.
+#
+# The LAST matching rule for a file wins. Order rules from most general (top)
+# to most specific (bottom) so that specific rules override general ones.
+#
+# Documentation: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# =============================================================================
+# GLOBAL OWNERS
+# =============================================================================
+# Every file in the repository requires approval from at least one member of
+# the core engineering leads team. This is the catch-all rule and applies to
+# any path not matched by a more specific rule below.
+#
+# @your-org/engineering-leads must include the tech lead and one senior engineer.
+# Minimum team size: 2. Maximum: 6. Reviewed and updated quarterly.
+
+*   @your-org/engineering-leads
+
+# =============================================================================
+# SAFETY-CRITICAL MODULES
+# =============================================================================
+# Files in these directories implement or directly support safety-critical
+# functionality as defined in the System Safety Plan (SSP-001).
+#
+# Changes require approval from BOTH the safety engineering team AND a
+# software quality assurance representative. Two separate reviews are needed
+# in addition to the standard 2-approver requirement, because CODEOWNERS
+# review counts as one of the required approvals.
+#
+# Do not add contributors to these teams without completing the safety
+# onboarding checklist (docs/safety/onboarding-checklist.md).
+
+# Safety-critical core logic
+src/safety/         @your-org/safety-engineers @your-org/software-qa
+
+# Actuator control and hardware interface layer
+# Changes here require hardware-in-the-loop (HIL) test evidence in the PR.
+src/actuators/      @your-org/safety-engineers @your-org/hardware-leads
+
+# Fault detection and system monitoring
+src/fault-monitor/  @your-org/safety-engineers @your-org/software-qa
+
+# Watchdog and failsafe implementations
+src/watchdog/       @your-org/safety-engineers @your-org/software-qa
+
+# Communication interfaces to safety-critical external systems
+src/interfaces/     @your-org/safety-engineers @your-org/software-qa
+
+# =============================================================================
+# TEST INFRASTRUCTURE
+# =============================================================================
+# All test files and coverage configuration. Changes here can affect the
+# validity of certification test evidence.
+#
+# Requires approval from QA leads to ensure test completeness and traceability
+# to requirements are maintained.
+
+# All test directories
+tests/              @your-org/software-qa @your-org/engineering-leads
+
+# Coverage thresholds and configuration
+coverage/           @your-org/software-qa
+
+# Test fixtures and mock data (especially safety-critical scenario mocks)
+tests/fixtures/     @your-org/software-qa @your-org/safety-engineers
+
+# Integration test harness
+tests/integration/  @your-org/software-qa @your-org/hardware-leads
+
+# =============================================================================
+# DOCUMENTATION
+# =============================================================================
+# Certification and compliance documentation must be reviewed by the quality
+# assurance team. General documentation requires engineering leads sign-off.
+
+# All documentation
+docs/               @your-org/engineering-leads
+
+# Certification evidence and compliance documentation
+# Changes here require QA lead AND a project manager (PM) approval.
+docs/certification-automation/  @your-org/software-qa @your-org/project-managers
+
+# Safety documentation (hazard analysis, FMEA, SSP)
+docs/safety/        @your-org/safety-engineers @your-org/software-qa
+
+# Architecture decision records
+docs/adr/           @your-org/engineering-leads
+
+# =============================================================================
+# CI/CD AND GITHUB CONFIGURATION
+# =============================================================================
+# Changes to GitHub Actions workflows, branch protection configuration, and
+# other CI/CD infrastructure affect the integrity of the certification pipeline.
+# These require DevSecOps team approval to prevent unauthorized changes to
+# security controls.
+
+# All GitHub configuration (workflows, templates, CODEOWNERS itself)
+.github/            @your-org/devsecops @your-org/engineering-leads
+
+# GitHub Actions workflow definitions
+.github/workflows/  @your-org/devsecops @your-org/engineering-leads
+
+# Issue and PR templates
+.github/ISSUE_TEMPLATE/  @your-org/engineering-leads
+.github/PULL_REQUEST_TEMPLATE/  @your-org/engineering-leads
+
+# =============================================================================
+# PROJECT CONFIGURATION AND BUILD SYSTEM
+# =============================================================================
+# Build configuration, dependency manifests, and environment configuration.
+# Changes to dependencies must be reviewed for security vulnerabilities and
+# license compatibility.
+
+# Top-level configuration directory
+config/             @your-org/engineering-leads @your-org/devsecops
+
+# Dependency manifests — reviewed for supply chain security
+package.json        @your-org/devsecops @your-org/engineering-leads
+package-lock.json   @your-org/devsecops @your-org/engineering-leads
+requirements.txt    @your-org/devsecops @your-org/engineering-leads
+pyproject.toml      @your-org/devsecops @your-org/engineering-leads
+Cargo.toml          @your-org/devsecops @your-org/engineering-leads
+Cargo.lock          @your-org/devsecops @your-org/engineering-leads
+go.mod              @your-org/devsecops @your-org/engineering-leads
+go.sum              @your-org/devsecops @your-org/engineering-leads
+
+# Dockerfile and container configuration
+Dockerfile          @your-org/devsecops @your-org/engineering-leads
+docker-compose*.yml @your-org/devsecops @your-org/engineering-leads
+
+# Infrastructure as code
+infra/              @your-org/devsecops @your-org/engineering-leads
+
+# =============================================================================
+# SECURITY CONFIGURATION
+# =============================================================================
+# Security policy, secret scanning configuration, and SAST rule definitions.
+# Only the DevSecOps team may approve changes to these files.
+
+SECURITY.md         @your-org/devsecops
+.semgrepignore      @your-org/devsecops
+.codeql/            @your-org/devsecops

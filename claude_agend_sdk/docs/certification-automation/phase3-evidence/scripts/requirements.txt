@@ -1,0 +1,16 @@
+# Core HTTP client (async + sync)
+httpx[http2]>=0.27.0
+
+# Progress bars
+tqdm>=4.66.0
+
+# Typing backports for Python < 3.11
+# (dataclasses is stdlib since 3.7, no extra needed)
+
+# Optional: faster JSON serialisation (drop-in replacement)
+# orjson>=3.9.0
+
+# Development / testing (not required at runtime)
+# pytest>=8.0.0
+# pytest-asyncio>=0.23.0
+# respx>=0.21.0   # httpx mocking

@@ -1,0 +1,391 @@
+{
+  "name": "JIRA → GitHub Sync (Certification Evidence)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "jira-webhook",
+        "responseMode": "onReceived",
+        "responseData": "firstEntryJson",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "node-webhook-jira",
+      "name": "JIRA Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "webhookId": "jira-to-github-webhook",
+      "notes": "Receives JIRA webhook events. Register this URL in JIRA under Project Settings → Webhooks. Subscribe to: jira:issue_updated, jira:issue_created, comment_created."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---------------------------------------------------------------------------\n// Extract and normalise the JIRA webhook payload.\n// Supports both cloud (atlassian-account-id) and server (name) user formats.\n// ---------------------------------------------------------------------------\nconst body = $input.first().json;\n\nconst eventType   = body.webhookEvent        || 'unknown';\nconst issueKey    = body.issue?.key          || '';\nconst summary     = body.issue?.fields?.summary || '';\nconst oldStatus   = body.changelog?.items?.find(i => i.field === 'status')?.fromString || '';\nconst newStatus   = body.changelog?.items?.find(i => i.field === 'status')?.toString   || body.issue?.fields?.status?.name || '';\nconst accountId   = body.user?.accountId     || body.user?.name || 'unknown';\nconst displayName = body.user?.displayName   || accountId;\n\n// Extract GitHub PR number from JIRA issue description or custom field\n// Convention: PR link stored in issue description as: PR: https://github.com/org/repo/pull/123\nconst description = body.issue?.fields?.description || '';\nconst prMatch     = description.match(/github\\.com\\/[^/]+\\/[^/]+\\/pull\\/(\\d+)/);\nconst prNumber    = prMatch ? prMatch[1] : null;\n\n// Extract repo owner/repo from PR URL\nconst repoMatch   = description.match(/github\\.com\\/([^/]+)\\/([^/]+)\\/pull/);\nconst repoOwner   = repoMatch ? repoMatch[1] : $env.GITHUB_OWNER;\nconst repoName    = repoMatch ? repoMatch[2] : $env.GITHUB_REPO;\n\n// headSha is intentionally empty: JIRA payloads do not carry Git SHAs.\n// An operator can enrich this value by adding a preceding GitHub API call to\n// GET /repos/{owner}/{repo}/pulls/{pull_number} and reading head.sha from the response.\n// Leaving headSha empty causes the commit-status guard (Has Head SHA?) to skip\n// the status POST rather than silently POST to a malformed URL.\nconst headSha = '';\n\nreturn [{\n  json: {\n    eventType,\n    issueKey,\n    summary,\n    oldStatus,\n    newStatus,\n    accountId,\n    displayName,\n    prNumber,\n    repoOwner,\n    repoName,\n    headSha,\n    rawEvent: body\n  }\n}];"
+      },
+      "id": "node-extract-jira",
+      "name": "Extract JIRA Fields",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.prNumber }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "id": "node-check-pr",
+      "name": "Has PR Number?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [680, 300],
+      "notes": "Only proceed if a GitHub PR number was found in the JIRA issue description. If not, log and stop."
+    },
+    {
+      "parameters": {
+        "rules": {
+          "rules": [
+            {
+              "value2": "In Review",
+              "outputKey": "in_review"
+            },
+            {
+              "value2": "Approved",
+              "outputKey": "approved"
+            },
+            {
+              "value2": "Rejected",
+              "outputKey": "rejected"
+            },
+            {
+              "value2": "In Progress",
+              "outputKey": "in_progress"
+            }
+          ]
+        },
+        "fallbackOutput": "none",
+        "dataPropertyName": "newStatus"
+      },
+      "id": "node-switch-status",
+      "name": "Route by JIRA Status",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [900, 300],
+      "notes": "Routes execution based on the new JIRA status. Add additional cases as your workflow evolves."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.github.com/repos/{{ $json.repoOwner }}/{{ $json.repoName }}/issues/{{ $json.prNumber }}/labels",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.GITHUB_TOKEN }}" },
+            { "name": "Accept",        "value": "application/vnd.github+json" },
+            { "name": "X-GitHub-Api-Version", "value": "2022-11-28" }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "labels",
+              "value": "=[\"jira:in-review\"]"
+            }
+          ]
+        },
+        "options": {
+          "response": { "response": { "neverError": false } }
+        }
+      },
+      "id": "node-gh-label-in-review",
+      "name": "GitHub: Add 'in-review' Label",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1140, 160],
+      "notes": "Adds label 'jira:in-review' to the GitHub PR. Create this label in GitHub first."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.github.com/repos/{{ $json.repoOwner }}/{{ $json.repoName }}/issues/{{ $json.prNumber }}/labels",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.GITHUB_TOKEN }}" },
+            { "name": "Accept",        "value": "application/vnd.github+json" },
+            { "name": "X-GitHub-Api-Version", "value": "2022-11-28" }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "labels", "value": "=[\"jira:approved\"]" }
+          ]
+        }
+      },
+      "id": "node-gh-label-approved",
+      "name": "GitHub: Add 'approved' Label",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1140, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.github.com/repos/{{ $json.repoOwner }}/{{ $json.repoName }}/issues/{{ $json.prNumber }}/labels",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.GITHUB_TOKEN }}" },
+            { "name": "Accept",        "value": "application/vnd.github+json" },
+            { "name": "X-GitHub-Api-Version", "value": "2022-11-28" }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "labels", "value": "=[\"jira:rejected\"]" }
+          ]
+        }
+      },
+      "id": "node-gh-label-rejected",
+      "name": "GitHub: Add 'rejected' Label",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1140, 440]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.headSha }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "id": "node-check-head-sha-approved",
+      "name": "Has Head SHA? (Approved)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1360, 300],
+      "notes": "headSha must be enriched by the caller — JIRA payloads do not carry Git SHAs. An operator can enrich via a preceding GitHub API call to GET /repos/{owner}/{repo}/pulls/{pull_number} if needed. If headSha is empty, skip the commit status POST gracefully."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.headSha }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "id": "node-check-head-sha-rejected",
+      "name": "Has Head SHA? (Rejected)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1360, 440],
+      "notes": "headSha must be enriched by the caller — JIRA payloads do not carry Git SHAs. An operator can enrich via a preceding GitHub API call to GET /repos/{owner}/{repo}/pulls/{pull_number} if needed. If headSha is empty, skip the commit status POST gracefully."
+    },
+    {
+      "parameters": {
+        "jsCode": "// No-op: headSha not available — skipping commit status POST.\n// To enable commit status checks, enrich headSha upstream by calling\n// GET /repos/{owner}/{repo}/pulls/{pull_number} and reading head.sha.\nconst item = $input.first().json;\nconsole.log(JSON.stringify({\n  timestamp:   new Date().toISOString(),\n  source:      'jira-to-github-sync',\n  level:       'DEBUG',\n  message:     'headSha empty — skipping commit status POST',\n  jira_ticket: item.issueKey,\n  prNumber:    item.prNumber\n}));\nreturn [{ json: { skipped: true, reason: 'no_head_sha', issueKey: item.issueKey } }];"
+      },
+      "id": "node-noop-no-sha",
+      "name": "No-op: No Head SHA",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1580, 520]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.github.com/repos/{{ $json.repoOwner }}/{{ $json.repoName }}/statuses/{{ $json.headSha }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.GITHUB_TOKEN }}" },
+            { "name": "Accept",        "value": "application/vnd.github+json" },
+            { "name": "X-GitHub-Api-Version", "value": "2022-11-28" }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "state",       "value": "success" },
+            { "name": "context",     "value": "jira/certification-review" },
+            { "name": "description", "value": "=JIRA {{ $json.issueKey }} approved by {{ $json.displayName }}" },
+            { "name": "target_url",  "value": "={{ $env.JIRA_API_URL }}/browse/{{ $json.issueKey }}" }
+          ]
+        }
+      },
+      "id": "node-gh-status-approved",
+      "name": "GitHub: Set Status Check (Approved)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1580, 300],
+      "notes": "headSha must be enriched by the caller — JIRA payloads do not carry Git SHAs. An operator can enrich via a preceding GitHub API call to GET /repos/{owner}/{repo}/pulls/{pull_number} if needed."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.github.com/repos/{{ $json.repoOwner }}/{{ $json.repoName }}/statuses/{{ $json.headSha }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.GITHUB_TOKEN }}" },
+            { "name": "Accept",        "value": "application/vnd.github+json" },
+            { "name": "X-GitHub-Api-Version", "value": "2022-11-28" }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "state",       "value": "failure" },
+            { "name": "context",     "value": "jira/certification-review" },
+            { "name": "description", "value": "=JIRA {{ $json.issueKey }} rejected by {{ $json.displayName }}" },
+            { "name": "target_url",  "value": "={{ $env.JIRA_API_URL }}/browse/{{ $json.issueKey }}" }
+          ]
+        }
+      },
+      "id": "node-gh-status-rejected",
+      "name": "GitHub: Set Status Check (Rejected)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1580, 440],
+      "notes": "headSha must be enriched by the caller — JIRA payloads do not carry Git SHAs. An operator can enrich via a preceding GitHub API call to GET /repos/{owner}/{repo}/pulls/{pull_number} if needed."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---------------------------------------------------------------------------\n// Build a structured log entry for every processed event.\n// This output can be forwarded to an audit log / S3 / Splunk.\n// ---------------------------------------------------------------------------\nconst now = new Date().toISOString();\nconst item = $input.first().json;\n\nconst logEntry = {\n  timestamp:  now,\n  source:     'jira-to-github-sync',\n  jira_ticket: item.issueKey  || 'N/A',\n  github_pr:  item.prNumber   || 'N/A',\n  action:     `status_changed:${item.oldStatus} → ${item.newStatus}`,\n  user:       item.displayName || item.accountId || 'unknown',\n  repo:       `${item.repoOwner}/${item.repoName}`,\n  level:      'INFO'\n};\n\nconsole.log(JSON.stringify(logEntry));\nreturn [{ json: logEntry }];"
+      },
+      "id": "node-log-success",
+      "name": "Structured Log (Success)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1580, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---------------------------------------------------------------------------\n// No-op: JIRA status not mapped to a GitHub action.\n// Log and exit cleanly so the webhook returns 200.\n// ---------------------------------------------------------------------------\nconst item = $input.first().json;\nconsole.log(JSON.stringify({\n  timestamp:   new Date().toISOString(),\n  source:      'jira-to-github-sync',\n  level:       'DEBUG',\n  message:     'Unhandled status — no GitHub action taken',\n  jira_ticket: item.issueKey,\n  newStatus:   item.newStatus\n}));\nreturn [{ json: { skipped: true, reason: 'unmapped_status', newStatus: item.newStatus } }];"
+      },
+      "id": "node-noop-unhandled",
+      "name": "No-op: Unhandled Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1140, 580]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---------------------------------------------------------------------------\n// No PR number found: log and stop. Webhook still returns 200.\n// ---------------------------------------------------------------------------\nconst item = $input.first().json;\nconsole.log(JSON.stringify({\n  timestamp:   new Date().toISOString(),\n  source:      'jira-to-github-sync',\n  level:       'WARN',\n  message:     'No GitHub PR number in JIRA issue description — skipping',\n  jira_ticket: item.issueKey\n}));\nreturn [{ json: { skipped: true, reason: 'no_pr_number', issueKey: item.issueKey } }];"
+      },
+      "id": "node-noop-no-pr",
+      "name": "No-op: No PR Number",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 480]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---------------------------------------------------------------------------\n// Error handler — catches failures from any upstream node.\n// Emits a structured error log and (optionally) sends a Slack/email alert.\n// ---------------------------------------------------------------------------\nconst error = $input.first().json;\nconsole.error(JSON.stringify({\n  timestamp: new Date().toISOString(),\n  source:    'jira-to-github-sync',\n  level:     'ERROR',\n  message:   error.message || 'Unknown error',\n  node:      error.node    || 'unknown',\n  details:   error\n}));\n// Re-throw so n8n marks the execution as failed\nthrow new Error(`[jira-to-github-sync] ${error.message || 'Workflow error'}`);"
+      },
+      "id": "node-error-handler",
+      "name": "Error Handler",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 620]
+    }
+  ],
+  "connections": {
+    "JIRA Webhook": {
+      "main": [
+        [{ "node": "Extract JIRA Fields", "type": "main", "index": 0 }]
+      ]
+    },
+    "Extract JIRA Fields": {
+      "main": [
+        [{ "node": "Has PR Number?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Has PR Number?": {
+      "main": [
+        [{ "node": "Route by JIRA Status",    "type": "main", "index": 0 }],
+        [{ "node": "No-op: No PR Number",      "type": "main", "index": 0 }]
+      ]
+    },
+    "Route by JIRA Status": {
+      "main": [
+        [{ "node": "GitHub: Add 'in-review' Label",      "type": "main", "index": 0 }],
+        [{ "node": "GitHub: Add 'approved' Label",       "type": "main", "index": 0 }],
+        [{ "node": "GitHub: Add 'rejected' Label",       "type": "main", "index": 0 }],
+        [{ "node": "No-op: Unhandled Status",            "type": "main", "index": 0 }]
+      ]
+    },
+    "GitHub: Add 'approved' Label": {
+      "main": [
+        [{ "node": "Has Head SHA? (Approved)", "type": "main", "index": 0 }]
+      ]
+    },
+    "GitHub: Add 'rejected' Label": {
+      "main": [
+        [{ "node": "Has Head SHA? (Rejected)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Has Head SHA? (Approved)": {
+      "main": [
+        [{ "node": "GitHub: Set Status Check (Approved)", "type": "main", "index": 0 }],
+        [{ "node": "No-op: No Head SHA", "type": "main", "index": 0 }]
+      ]
+    },
+    "Has Head SHA? (Rejected)": {
+      "main": [
+        [{ "node": "GitHub: Set Status Check (Rejected)", "type": "main", "index": 0 }],
+        [{ "node": "No-op: No Head SHA", "type": "main", "index": 0 }]
+      ]
+    },
+    "GitHub: Set Status Check (Approved)": {
+      "main": [
+        [{ "node": "Structured Log (Success)", "type": "main", "index": 0 }]
+      ]
+    },
+    "GitHub: Set Status Check (Rejected)": {
+      "main": [
+        [{ "node": "Structured Log (Success)", "type": "main", "index": 0 }]
+      ]
+    },
+    "GitHub: Add 'in-review' Label": {
+      "main": [
+        [{ "node": "Structured Log (Success)", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "errorWorkflow": "node-error-handler"
+  },
+  "versionId": "1.0.0",
+  "id": "jira-to-github-sync",
+  "meta": {
+    "instanceId": "certification-automation"
+  },
+  "tags": [
+    { "name": "certification" },
+    { "name": "jira" },
+    { "name": "github" }
+  ]
+}

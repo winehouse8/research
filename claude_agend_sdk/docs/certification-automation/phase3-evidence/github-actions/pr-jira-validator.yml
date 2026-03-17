@@ -1,0 +1,284 @@
+name: PR JIRA Ticket Validator
+
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - synchronize
+
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+
+jobs:
+  validate-jira-ticket:
+    runs-on: ubuntu-latest
+
+    env:
+      JIRA_BASE_URL: ${{ vars.JIRA_BASE_URL }}
+      JIRA_API_EMAIL: ${{ secrets.JIRA_API_EMAIL }}
+      JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      # ------------------------------------------------------------------
+      # 1. Extract JIRA ticket ID from PR title
+      # ------------------------------------------------------------------
+      - name: Extract JIRA ticket ID from PR title
+        id: extract_ticket
+        run: |
+          set -euo pipefail
+
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          echo "PR title: ${PR_TITLE}"
+
+          # Match [A-Z]+-\d+ anywhere in the title
+          JIRA_ID=$(echo "${PR_TITLE}" | grep -oE '[A-Z]+-[0-9]+' | head -1 || true)
+
+          if [ -z "${JIRA_ID}" ]; then
+            echo "jira_found=false" >> "$GITHUB_OUTPUT"
+            echo "jira_id=" >> "$GITHUB_OUTPUT"
+          else
+            echo "jira_found=true" >> "$GITHUB_OUTPUT"
+            echo "jira_id=${JIRA_ID}" >> "$GITHUB_OUTPUT"
+            echo "Found JIRA ticket ID: ${JIRA_ID}"
+          fi
+
+      # ------------------------------------------------------------------
+      # 2. Fail early if no JIRA ticket is found
+      # ------------------------------------------------------------------
+      - name: Fail if no JIRA ticket found
+        if: steps.extract_ticket.outputs.jira_found == 'false'
+        run: |
+          cat <<'EOF'
+          ERROR: No JIRA ticket ID found in the pull request title.
+
+          Your PR title must include a JIRA ticket reference matching the
+          pattern [PROJECT-123] (e.g. "PROJ-456 Add login feature").
+
+          Examples of valid PR titles:
+            PROJ-123 Fix authentication bug
+            [PROJ-456] Refactor database layer
+            feat: MYPROJ-789 add new API endpoint
+
+          Please edit your PR title to include the relevant JIRA ticket ID
+          and re-open or update the pull request.
+          EOF
+          exit 1
+
+      # ------------------------------------------------------------------
+      # 3. Call JIRA API to verify ticket exists and is accessible
+      # ------------------------------------------------------------------
+      - name: Verify JIRA ticket exists
+        id: jira_check
+        if: steps.extract_ticket.outputs.jira_found == 'true'
+        run: |
+          set -euo pipefail
+          JIRA_ID="${{ steps.extract_ticket.outputs.jira_id }}"
+
+          HTTP_CODE=$(curl -s -o /tmp/jira_response.json -w "%{http_code}" \
+            -u "${JIRA_API_EMAIL}:${JIRA_API_TOKEN}" \
+            -H "Accept: application/json" \
+            "${JIRA_BASE_URL}/rest/api/3/issue/${JIRA_ID}" 2>/dev/null)
+
+          echo "JIRA API HTTP status: ${HTTP_CODE}"
+
+          case "${HTTP_CODE}" in
+            200)
+              echo "jira_accessible=true" >> "$GITHUB_OUTPUT"
+              ;;
+            401)
+              echo "ERROR: JIRA API authentication failed. Check JIRA_API_EMAIL and JIRA_API_TOKEN secrets."
+              exit 1
+              ;;
+            403)
+              echo "ERROR: Access to JIRA ticket ${JIRA_ID} is forbidden. Ensure the service account has permission."
+              exit 1
+              ;;
+            404)
+              echo "ERROR: JIRA ticket ${JIRA_ID} does not exist or is not accessible."
+              echo "Please verify the ticket ID in your PR title is correct."
+              exit 1
+              ;;
+            *)
+              echo "ERROR: Unexpected JIRA API response (HTTP ${HTTP_CODE}) for ticket ${JIRA_ID}."
+              cat /tmp/jira_response.json || true
+              exit 1
+              ;;
+          esac
+
+          # Parse ticket fields
+          STATUS=$(jq -r '.fields.status.name' /tmp/jira_response.json)
+          SUMMARY=$(jq -r '.fields.summary' /tmp/jira_response.json)
+          ASSIGNEE=$(jq -r '.fields.assignee.displayName // "Unassigned"' /tmp/jira_response.json)
+          TICKET_URL="${JIRA_BASE_URL}/browse/${JIRA_ID}"
+
+          echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
+          echo "summary=${SUMMARY}" >> "$GITHUB_OUTPUT"
+          echo "assignee=${ASSIGNEE}" >> "$GITHUB_OUTPUT"
+          echo "ticket_url=${TICKET_URL}" >> "$GITHUB_OUTPUT"
+
+          echo "Ticket ${JIRA_ID}: status='${STATUS}', summary='${SUMMARY}'"
+
+      # ------------------------------------------------------------------
+      # 4. Check ticket status is appropriate for a PR (not Closed or Open)
+      # ------------------------------------------------------------------
+      - name: Validate JIRA ticket status
+        id: status_check
+        if: steps.extract_ticket.outputs.jira_found == 'true'
+        run: |
+          set -euo pipefail
+          JIRA_ID="${{ steps.extract_ticket.outputs.jira_id }}"
+          STATUS="${{ steps.jira_check.outputs.status }}"
+
+          # Normalise for comparison
+          STATUS_LOWER=$(echo "${STATUS}" | tr '[:upper:]' '[:lower:]')
+
+          case "${STATUS_LOWER}" in
+            "closed"|"done"|"cancelled"|"rejected"|"won't do"|"wont do")
+              echo "status_valid=false" >> "$GITHUB_OUTPUT"
+              echo "status_reason=terminal" >> "$GITHUB_OUTPUT"
+              echo "ERROR: JIRA ticket ${JIRA_ID} has terminal status '${STATUS}'."
+              echo "PRs should not be opened against closed or resolved tickets."
+              ;;
+            "open"|"to do"|"backlog"|"new")
+              echo "status_valid=false" >> "$GITHUB_OUTPUT"
+              echo "status_reason=not_started" >> "$GITHUB_OUTPUT"
+              echo "WARNING: JIRA ticket ${JIRA_ID} has status '${STATUS}'."
+              echo "The ticket must be 'In Progress' or further in the workflow before merging."
+              ;;
+            "in progress"|"in review"|"review"|"testing"|"in testing"|"ready for review")
+              echo "status_valid=true" >> "$GITHUB_OUTPUT"
+              echo "status_reason=ok" >> "$GITHUB_OUTPUT"
+              echo "JIRA ticket ${JIRA_ID} status '${STATUS}' is acceptable for a PR."
+              ;;
+            *)
+              # Unknown status — allow but warn
+              echo "status_valid=true" >> "$GITHUB_OUTPUT"
+              echo "status_reason=unknown" >> "$GITHUB_OUTPUT"
+              echo "NOTICE: JIRA ticket ${JIRA_ID} has unrecognised status '${STATUS}'. Allowing PR to proceed."
+              ;;
+          esac
+
+      # ------------------------------------------------------------------
+      # 5. Post PR comment with JIRA ticket link and status (first run only)
+      # ------------------------------------------------------------------
+      - name: Post PR comment with JIRA info
+        if: |
+          steps.extract_ticket.outputs.jira_found == 'true' &&
+          github.event.action == 'opened'
+        run: |
+          set -euo pipefail
+          JIRA_ID="${{ steps.extract_ticket.outputs.jira_id }}"
+          STATUS="${{ steps.jira_check.outputs.status }}"
+          SUMMARY="${{ steps.jira_check.outputs.summary }}"
+          ASSIGNEE="${{ steps.jira_check.outputs.assignee }}"
+          TICKET_URL="${{ steps.jira_check.outputs.ticket_url }}"
+          STATUS_VALID="${{ steps.status_check.outputs.status_valid }}"
+          STATUS_REASON="${{ steps.status_check.outputs.status_reason }}"
+
+          # Choose status badge
+          if [ "${STATUS_VALID}" = "true" ]; then
+            STATUS_ICON=":white_check_mark:"
+          else
+            STATUS_ICON=":warning:"
+          fi
+
+          # Compose status note
+          case "${STATUS_REASON}" in
+            terminal)
+              STATUS_NOTE="> **Warning:** This ticket has a terminal status. Please verify this PR targets the correct ticket."
+              ;;
+            not_started)
+              STATUS_NOTE="> **Warning:** This ticket has not been started. Please move it to _In Progress_ before merging."
+              ;;
+            unknown)
+              STATUS_NOTE="> **Notice:** This ticket status was not recognised by the validator. Review manually."
+              ;;
+            *)
+              STATUS_NOTE=""
+              ;;
+          esac
+
+          COMMENT_BODY=$(cat <<COMMENT
+          ### JIRA Ticket Validation ${STATUS_ICON}
+
+          | Field | Value |
+          |---|---|
+          | Ticket | [${JIRA_ID}](${TICKET_URL}) |
+          | Summary | ${SUMMARY} |
+          | Status | **${STATUS}** |
+          | Assignee | ${ASSIGNEE} |
+
+          ${STATUS_NOTE}
+
+          _This comment was posted automatically by the PR JIRA Validator workflow._
+          COMMENT
+          )
+
+          gh pr comment "${{ github.event.pull_request.number }}" \
+            --repo "${{ github.repository }}" \
+            --body "${COMMENT_BODY}"
+
+      # ------------------------------------------------------------------
+      # 6. Set commit status: "jira-ticket-validator" context
+      # ------------------------------------------------------------------
+      - name: Set commit status — success
+        if: |
+          steps.extract_ticket.outputs.jira_found == 'true' &&
+          steps.status_check.outputs.status_valid == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const jiraId   = '${{ steps.extract_ticket.outputs.jira_id }}';
+            const status   = '${{ steps.jira_check.outputs.status }}';
+            const ticketUrl = '${{ steps.jira_check.outputs.ticket_url }}';
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              sha:   context.payload.pull_request.head.sha,
+              state: 'success',
+              target_url: ticketUrl,
+              description: `${jiraId} — ${status}`,
+              context: 'jira-ticket-validator',
+            });
+
+      - name: Set commit status — failure (no ticket)
+        if: steps.extract_ticket.outputs.jira_found == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              sha:   context.payload.pull_request.head.sha,
+              state: 'failure',
+              description: 'No JIRA ticket ID found in PR title',
+              context: 'jira-ticket-validator',
+            });
+
+      - name: Set commit status — failure (invalid status)
+        if: |
+          steps.extract_ticket.outputs.jira_found == 'true' &&
+          steps.status_check.outputs.status_valid == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const jiraId    = '${{ steps.extract_ticket.outputs.jira_id }}';
+            const status    = '${{ steps.jira_check.outputs.status }}';
+            const reason    = '${{ steps.status_check.outputs.status_reason }}';
+            const ticketUrl = '${{ steps.jira_check.outputs.ticket_url }}';
+            const desc = reason === 'terminal'
+              ? `${jiraId} is in a terminal state: ${status}`
+              : `${jiraId} must be In Progress or later (currently: ${status})`;
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              sha:   context.payload.pull_request.head.sha,
+              state: 'failure',
+              target_url: ticketUrl,
+              description: desc,
+              context: 'jira-ticket-validator',
+            });

@@ -1,0 +1,54 @@
+{
+  "title": "에이전트 메모리 v2 보고서 — 7개 최신 레포지토리 분석 + 심화 설계",
+  "description": "트위터 큐레이션된 7개 최신 에이전틱 메모리 레포 분석 후 260317_agent-ecosystem-minimal.md의 v2 보고서 작성",
+  "stories": [
+    {
+      "id": "US-001",
+      "title": "7개 레포지토리 분석 — 핵심 아이디어 추출",
+      "acceptanceCriteria": [
+        "hyperspaceai/agi: 프로젝트 목적, 메모리 아키텍처, 적용 인사이트 요약",
+        "CodeGraphContext/CodeGraphContext: 코드 그래프 구조, 컨텍스트 관리 방식 요약",
+        "Clyra-AI/wrkr: 워커 에이전트 상태 관리, 메모리 구조 요약",
+        "skillnet.openkg.cn: 스킬 지식 그래프 구조, 에이전트 스킬 조직 방법 요약",
+        "andrewyng/context-hub: 컨텍스트 허브 아키텍처, 허브-스포크 설계 요약",
+        "volcengine/OpenViking: 멀티에이전트 메모리 공유, 컨텍스트 관리 요약",
+        "666ghj/MiroFish: 메모리 설계, 에이전트 지식 관리 방식 요약",
+        "각 레포에 대해 v1 보고서 대비 새로운 인사이트 1가지 이상 명시"
+      ],
+      "passes": true
+    },
+    {
+      "id": "US-002",
+      "title": "v1 vs v2 비교 — 새로운 발견으로 업데이트되는 부분 명시",
+      "acceptanceCriteria": [
+        "v1의 메모리 아키텍처 추천(SQLite+WAL+Zep+A-MEM 조합)이 7개 레포 분석 후에도 유효한지 검토",
+        "v1에서 다루지 않은 새로운 메모리 패턴 2가지 이상 발견 및 설명",
+        "v1의 최소 스키마(papers + edges + evaluations)에 추가/수정이 필요한 부분 명시",
+        "v1의 오컴의 면도날 3원칙(평가압력 + 다양성 보존 + 상태 명시성)이 확장되거나 수정되는지 검토"
+      ],
+      "passes": true
+    },
+    {
+      "id": "US-003",
+      "title": "심화 아키텍처 — 실용적 구현 코드 보강",
+      "acceptanceCriteria": [
+        "7개 레포에서 발견된 패턴을 반영한 업데이트된 SQLite 스키마 제안 (코드 포함)",
+        "에이전트가 메모리를 읽고 쓰는 실제 워크플로우를 코드로 표현 (20줄 이내)",
+        "멀티에이전트 환경에서 메모리 충돌을 방지하는 패턴 제안 (코드 또는 의사코드)",
+        "코드 스니펫 최소 3개 포함"
+      ],
+      "passes": true
+    },
+    {
+      "id": "US-004",
+      "title": "v2 보고서 저장",
+      "acceptanceCriteria": [
+        "파일 /home/jovyan/deephunter-data-volumes/research/auto_research/docs/260317_agent-ecosystem-minimal-v2.md 존재",
+        "US-001~003 내용 모두 포함",
+        "v1 보고서 대비 명확하게 새로운 내용 추가 (단순 반복 금지)",
+        "3000단어 이상, 코드 스니펫 최소 3개"
+      ],
+      "passes": true
+    }
+  ]
+}

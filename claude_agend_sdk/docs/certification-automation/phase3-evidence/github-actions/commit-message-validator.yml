@@ -1,0 +1,337 @@
+name: Commit Message Validator
+
+on:
+  push:
+    branches:
+      - main
+      - "release/**"
+      - "feature/**"
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  validate-commit-messages:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ------------------------------------------------------------------
+      # 1. Checkout with full history for the push range
+      # ------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ------------------------------------------------------------------
+      # 2. Determine validation mode (blocking vs advisory)
+      #    Controlled by repository variable COMMIT_VALIDATION_MODE.
+      #    Accepted values: "blocking" (default) | "advisory"
+      # ------------------------------------------------------------------
+      - name: Resolve validation mode
+        id: mode
+        run: |
+          set -euo pipefail
+          MODE="${{ vars.COMMIT_VALIDATION_MODE }}"
+          MODE_LOWER=$(echo "${MODE}" | tr '[:upper:]' '[:lower:]')
+
+          case "${MODE_LOWER}" in
+            advisory)
+              echo "mode=advisory" >> "$GITHUB_OUTPUT"
+              echo "Validation mode: ADVISORY (failures will not block the push)"
+              ;;
+            blocking|"")
+              echo "mode=blocking" >> "$GITHUB_OUTPUT"
+              echo "Validation mode: BLOCKING (failures will fail this job)"
+              ;;
+            *)
+              echo "WARNING: Unrecognised COMMIT_VALIDATION_MODE '${MODE}'. Defaulting to 'blocking'."
+              echo "mode=blocking" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      # ------------------------------------------------------------------
+      # 3. Get list of commits introduced by this push
+      # ------------------------------------------------------------------
+      - name: Get commits in this push
+        id: get_commits
+        run: |
+          set -euo pipefail
+
+          BEFORE="${{ github.event.before }}"
+          AFTER="${{ github.event.after }}"
+
+          # github.event.before is all-zeros on the first push to a new branch
+          ZERO_SHA="0000000000000000000000000000000000000000"
+
+          if [ "${BEFORE}" = "${ZERO_SHA}" ]; then
+            # New branch: validate only the tip commit to avoid re-validating
+            # every historical commit from the branch point.
+            echo "New branch detected; validating tip commit only."
+            git log -1 --pretty=format:"%H%n%s%n---COMMIT_SEP---" > /tmp/commits_raw.txt
+          else
+            # Existing branch: validate all commits in the push range
+            git log "${BEFORE}..${AFTER}" --pretty=format:"%H%n%s%n---COMMIT_SEP---" > /tmp/commits_raw.txt
+          fi
+
+          COMMIT_COUNT=$(grep -c "---COMMIT_SEP---" /tmp/commits_raw.txt || true)
+          echo "commit_count=${COMMIT_COUNT}" >> "$GITHUB_OUTPUT"
+          echo "Commits to validate: ${COMMIT_COUNT}"
+          cat /tmp/commits_raw.txt
+
+      # ------------------------------------------------------------------
+      # 4. Validate each commit message and collect failures
+      # ------------------------------------------------------------------
+      - name: Validate commit message format
+        id: validate
+        run: |
+          set -euo pipefail
+
+          # Pattern: must contain a JIRA-style ticket reference anywhere in
+          # the subject line.
+          # Accepted forms:
+          #   PROJECT-123 description
+          #   [PROJECT-123] description
+          #   feat: PROJECT-123 description
+          #   fix(scope): [PROJECT-123] description
+          TICKET_PATTERN='[A-Z]+-[0-9]+'
+
+          # Commits that should be skipped (automated / merge commits)
+          SKIP_PATTERN='^(Merge (pull request|branch|remote-tracking branch)|Revert "|Release |Bump version|chore(release)|Initial commit)'
+
+          FAIL_COUNT=0
+          PASS_COUNT=0
+          SKIP_COUNT=0
+          FAIL_LIST=""
+
+          # Parse commits from the raw log: each entry is SHA, then subject, then separator
+          SHA=""
+          SUBJECT=""
+
+          while IFS= read -r line; do
+            if [ -z "${SHA}" ]; then
+              # First line of entry is the SHA
+              SHA="${line}"
+              continue
+            fi
+
+            if [ "${line}" = "---COMMIT_SEP---" ]; then
+              # End of entry: validate this commit
+              SHORT_SHA="${SHA:0:8}"
+
+              # Check if this is an automated commit that should be skipped
+              if echo "${SUBJECT}" | grep -qE "${SKIP_PATTERN}"; then
+                SKIP_COUNT=$((SKIP_COUNT + 1))
+                echo "SKIP  ${SHORT_SHA}  ${SUBJECT}"
+                SHA=""
+                SUBJECT=""
+                continue
+              fi
+
+              # Validate ticket reference presence
+              if echo "${SUBJECT}" | grep -qE "${TICKET_PATTERN}"; then
+                PASS_COUNT=$((PASS_COUNT + 1))
+                echo "PASS  ${SHORT_SHA}  ${SUBJECT}"
+              else
+                FAIL_COUNT=$((FAIL_COUNT + 1))
+                echo "FAIL  ${SHORT_SHA}  ${SUBJECT}"
+                FAIL_LIST="${FAIL_LIST}\n  - ${SHORT_SHA}: ${SUBJECT}"
+              fi
+
+              SHA=""
+              SUBJECT=""
+            else
+              # Lines between SHA and separator are the subject
+              if [ -z "${SUBJECT}" ]; then
+                SUBJECT="${line}"
+              fi
+            fi
+          done < /tmp/commits_raw.txt
+
+          echo ""
+          echo "Results: ${PASS_COUNT} passed, ${FAIL_COUNT} failed, ${SKIP_COUNT} skipped."
+
+          echo "pass_count=${PASS_COUNT}" >> "$GITHUB_OUTPUT"
+          echo "fail_count=${FAIL_COUNT}" >> "$GITHUB_OUTPUT"
+          echo "skip_count=${SKIP_COUNT}" >> "$GITHUB_OUTPUT"
+
+          # Write fail list to a file to preserve newlines across steps
+          printf "%b" "${FAIL_LIST}" > /tmp/fail_list.txt
+
+          if [ "${FAIL_COUNT}" -gt 0 ]; then
+            echo "has_failures=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_failures=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ------------------------------------------------------------------
+      # 5. Output failure details with fix instructions
+      # ------------------------------------------------------------------
+      - name: Report failing commits
+        if: steps.validate.outputs.has_failures == 'true'
+        run: |
+          set -euo pipefail
+          FAIL_COUNT="${{ steps.validate.outputs.fail_count }}"
+          MODE="${{ steps.mode.outputs.mode }}"
+
+          echo ""
+          echo "========================================================"
+          echo " COMMIT MESSAGE VALIDATION FAILED"
+          echo "========================================================"
+          echo ""
+          echo "${FAIL_COUNT} commit(s) do not reference a JIRA ticket:"
+          cat /tmp/fail_list.txt
+          echo ""
+          echo "--------------------------------------------------------"
+          echo " REQUIRED FORMAT"
+          echo "--------------------------------------------------------"
+          echo ""
+          echo "  Every commit subject must include a JIRA ticket ID"
+          echo "  matching the pattern:  [A-Z]+-[0-9]+"
+          echo ""
+          echo "  Valid examples:"
+          echo "    PROJ-123 fix null pointer in login handler"
+          echo "    [PROJ-456] refactor: extract database service layer"
+          echo "    feat(auth): MYPROJ-789 add OAuth2 support"
+          echo ""
+          echo "  To amend the most recent commit:"
+          echo "    git commit --amend -m 'PROJ-123 your original message'"
+          echo ""
+          echo "  To reword older commits interactively:"
+          echo "    git rebase -i HEAD~<number-of-commits>"
+          echo "    (then change 'pick' to 'reword' for failing commits)"
+          echo ""
+          echo "  After amending, force-push your feature branch:"
+          echo "    git push --force-with-lease origin <branch-name>"
+          echo ""
+
+          if [ "${MODE}" = "advisory" ]; then
+            echo "NOTE: COMMIT_VALIDATION_MODE=advisory — this is a warning only."
+            echo "      The push will not be blocked."
+          fi
+
+      # ------------------------------------------------------------------
+      # 6. Write GitHub Step Summary
+      # ------------------------------------------------------------------
+      - name: Write job summary
+        if: always()
+        run: |
+          set -euo pipefail
+          PASS_COUNT="${{ steps.validate.outputs.pass_count }}"
+          FAIL_COUNT="${{ steps.validate.outputs.fail_count }}"
+          SKIP_COUNT="${{ steps.validate.outputs.skip_count }}"
+          MODE="${{ steps.mode.outputs.mode }}"
+          BRANCH="${{ github.ref_name }}"
+          AFTER="${{ github.event.after }}"
+          HAS_FAILURES="${{ steps.validate.outputs.has_failures }}"
+
+          if [ "${HAS_FAILURES}" = "true" ]; then
+            OVERALL=":x: Failed"
+          else
+            OVERALL=":white_check_mark: Passed"
+          fi
+
+          cat >> "$GITHUB_STEP_SUMMARY" <<SUMMARY
+          ## Commit Message Validation — ${OVERALL}
+
+          | Field | Value |
+          |---|---|
+          | Branch | \`${BRANCH}\` |
+          | Push SHA | \`${AFTER:0:8}\` |
+          | Mode | \`${MODE}\` |
+          | Passed | ${PASS_COUNT} |
+          | Failed | ${FAIL_COUNT} |
+          | Skipped (automated) | ${SKIP_COUNT} |
+
+          ### Expected Format
+
+          Each commit subject must include a JIRA ticket ID matching \`[A-Z]+-[0-9]+\`.
+
+          **Valid examples:**
+          \`\`\`
+          PROJ-123 fix null pointer in login handler
+          [PROJ-456] refactor: extract database service layer
+          feat(auth): MYPROJ-789 add OAuth2 support
+          \`\`\`
+
+          ### Validation Mode
+
+          The validation mode is controlled by the repository variable \`COMMIT_VALIDATION_MODE\`:
+          - \`blocking\` (default): failing commits cause this job to fail
+          - \`advisory\`: failing commits produce a warning but do not block the push
+          SUMMARY
+
+          if [ "${HAS_FAILURES}" = "true" ] && [ -s /tmp/fail_list.txt ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "### Failing Commits" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            while IFS= read -r line; do
+              echo "- \`${line}\`" >> "$GITHUB_STEP_SUMMARY"
+            done < /tmp/fail_list.txt
+          fi
+
+      # ------------------------------------------------------------------
+      # 7. Set commit status on the pushed SHA
+      # ------------------------------------------------------------------
+      - name: Set commit status — success
+        if: steps.validate.outputs.has_failures == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const passed = '${{ steps.validate.outputs.pass_count }}';
+            const skipped = '${{ steps.validate.outputs.skip_count }}';
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              sha:   context.sha,
+              state: 'success',
+              description: `All commits have JIRA references (${passed} passed, ${skipped} skipped)`,
+              context: 'commit-message-validator',
+            });
+
+      - name: Set commit status — advisory warning
+        if: |
+          steps.validate.outputs.has_failures == 'true' &&
+          steps.mode.outputs.mode == 'advisory'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const failed = '${{ steps.validate.outputs.fail_count }}';
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              sha:   context.sha,
+              state: 'success',
+              description: `Advisory: ${failed} commit(s) missing JIRA reference (non-blocking)`,
+              context: 'commit-message-validator',
+            });
+
+      - name: Set commit status — blocking failure
+        if: |
+          steps.validate.outputs.has_failures == 'true' &&
+          steps.mode.outputs.mode == 'blocking'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const failed = '${{ steps.validate.outputs.fail_count }}';
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              sha:   context.sha,
+              state: 'failure',
+              description: `${failed} commit(s) missing JIRA ticket reference`,
+              context: 'commit-message-validator',
+            });
+
+      # ------------------------------------------------------------------
+      # 8. Fail the job in blocking mode if there are validation failures
+      # ------------------------------------------------------------------
+      - name: Fail job in blocking mode
+        if: |
+          steps.validate.outputs.has_failures == 'true' &&
+          steps.mode.outputs.mode == 'blocking'
+        run: |
+          echo "Failing job: ${{ steps.validate.outputs.fail_count }} commit(s) did not pass validation."
+          echo "Set repository variable COMMIT_VALIDATION_MODE=advisory to make this non-blocking."
+          exit 1

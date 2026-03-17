@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"echo \\\"GITHUB_TOKEN: ${GITHUB_TOKEN:0:10}...\\\" && git config --global credential.helper 2>/dev/null && cat ~/.gitconfig 2>/dev/null\",\"description\":\"Check GitHub token and git config\"}",
+  "error": "Exit code 1\nGITHUB_TOKEN: ...\n\nGITHUB_TOKEN: ...",
+  "timestamp": "2026-03-17T09:41:18.020Z",
+  "retry_count": 2
+}

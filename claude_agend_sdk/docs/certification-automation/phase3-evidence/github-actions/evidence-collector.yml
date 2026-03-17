@@ -1,0 +1,521 @@
+name: Evidence Collector
+
+on:
+  pull_request:
+    types:
+      - closed
+
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number to collect evidence for"
+        required: true
+        type: number
+      release_tag:
+        description: "Release tag to associate with this evidence record"
+        required: false
+        type: string
+        default: "manual-run"
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+  checks: read
+
+jobs:
+  collect-evidence:
+    # For PR trigger: only run when the PR was actually merged.
+    # For manual trigger: always run.
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
+
+    runs-on: ubuntu-latest
+
+    env:
+      JIRA_BASE_URL: ${{ vars.JIRA_BASE_URL }}
+      JIRA_API_EMAIL: ${{ secrets.JIRA_API_EMAIL }}
+      JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+      S3_BUCKET: ${{ secrets.S3_BUCKET }}
+      S3_REGION: ${{ vars.S3_REGION || 'us-east-1' }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      # ------------------------------------------------------------------
+      # 1. Checkout repository
+      # ------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ------------------------------------------------------------------
+      # 2. Get PR metadata via GitHub API
+      # ------------------------------------------------------------------
+      - name: Get PR metadata
+        id: pr_meta
+        run: |
+          set -euo pipefail
+
+          # Resolve PR number from trigger type
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PR_NUMBER="${{ github.event.inputs.pr_number }}"
+            RELEASE_TAG="${{ github.event.inputs.release_tag }}"
+          else
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+            # Try to derive tag from branch name or default to sha
+            RELEASE_TAG=$(git describe --tags --exact-match HEAD 2>/dev/null || echo "pr-${PR_NUMBER}-${{ github.sha }}")
+          fi
+
+          echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+
+          # Fetch full PR data
+          gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}" \
+            --jq '{
+              url: .html_url,
+              number: .number,
+              title: .title,
+              author: .user.login,
+              created_at: .created_at,
+              merged_at: .merged_at,
+              merge_commit_sha: .merge_commit_sha,
+              base_branch: .base.ref,
+              head_branch: .head.ref
+            }' > /tmp/pr_meta.json
+
+          echo "PR metadata collected:"
+          cat /tmp/pr_meta.json
+
+      # ------------------------------------------------------------------
+      # 3. Get CI results (download workflow artifacts from prior runs)
+      # ------------------------------------------------------------------
+      - name: Get CI results
+        id: ci_results
+        run: |
+          set -euo pipefail
+          PR_NUMBER="${{ steps.pr_meta.outputs.pr_number }}"
+          MERGE_SHA=$(jq -r '.merge_commit_sha // empty' /tmp/pr_meta.json)
+          HEAD_BRANCH=$(jq -r '.head_branch' /tmp/pr_meta.json)
+
+          # Find the most recent successful workflow run for this PR's head branch
+          WORKFLOW_RUN=$(gh api \
+            "repos/${{ github.repository }}/actions/runs?branch=${HEAD_BRANCH}&event=pull_request&status=completed&per_page=20" \
+            --jq "[.workflow_runs[] | select(.head_sha == \"${MERGE_SHA}\" or .pull_requests[].number == ${PR_NUMBER})] | first // .workflow_runs[0]" \
+            2>/dev/null || echo "null")
+
+          if [ "${WORKFLOW_RUN}" = "null" ] || [ -z "${WORKFLOW_RUN}" ]; then
+            echo "No prior workflow run found; using placeholder CI results."
+            cat > /tmp/ci_results.json <<'JSON'
+          {
+            "workflow_run_id": 0,
+            "workflow_name": "unknown",
+            "conclusion": "unknown",
+            "started_at": null,
+            "completed_at": null,
+            "test_summary": { "passed": 0, "failed": 0, "skipped": 0 },
+            "coverage_percent": null,
+            "sast_findings_count": null
+          }
+          JSON
+          else
+            RUN_ID=$(echo "${WORKFLOW_RUN}" | jq -r '.id')
+            RUN_NAME=$(echo "${WORKFLOW_RUN}" | jq -r '.name')
+            CONCLUSION=$(echo "${WORKFLOW_RUN}" | jq -r '.conclusion')
+            STARTED=$(echo "${WORKFLOW_RUN}" | jq -r '.run_started_at')
+            COMPLETED=$(echo "${WORKFLOW_RUN}" | jq -r '.updated_at')
+
+            # Attempt to download test-results artifact if present
+            mkdir -p /tmp/artifacts
+            gh run download "${RUN_ID}" \
+              --repo "${{ github.repository }}" \
+              --dir /tmp/artifacts \
+              --pattern "test-results*" 2>/dev/null || true
+            gh run download "${RUN_ID}" \
+              --repo "${{ github.repository }}" \
+              --dir /tmp/artifacts \
+              --pattern "coverage*" 2>/dev/null || true
+            gh run download "${RUN_ID}" \
+              --repo "${{ github.repository }}" \
+              --dir /tmp/artifacts \
+              --pattern "sast*" 2>/dev/null || true
+
+            # Parse test summary if JUnit XML is present
+            PASSED=0; FAILED=0; SKIPPED=0
+            if find /tmp/artifacts -name "*.xml" -print -quit | grep -q .; then
+              PASSED=$(grep -rh 'tests=' /tmp/artifacts/*.xml 2>/dev/null \
+                | grep -oP 'tests="\K[0-9]+' | awk '{s+=$1} END {print s+0}')
+              FAILED=$(grep -rh 'failures=' /tmp/artifacts/*.xml 2>/dev/null \
+                | grep -oP 'failures="\K[0-9]+' | awk '{s+=$1} END {print s+0}')
+              SKIPPED=$(grep -rh 'skipped=' /tmp/artifacts/*.xml 2>/dev/null \
+                | grep -oP 'skipped="\K[0-9]+' | awk '{s+=$1} END {print s+0}')
+            fi
+
+            # Parse coverage if summary JSON present
+            COVERAGE="null"
+            if [ -f /tmp/artifacts/coverage/summary.json ]; then
+              COVERAGE=$(jq '.total.lines.pct // null' /tmp/artifacts/coverage/summary.json 2>/dev/null || echo "null")
+            fi
+
+            # Parse SAST finding count
+            SAST="null"
+            if [ -f /tmp/artifacts/sast/findings.json ]; then
+              SAST=$(jq '[.findings[]] | length' /tmp/artifacts/sast/findings.json 2>/dev/null || echo "null")
+            fi
+
+            jq -n \
+              --argjson run_id "${RUN_ID}" \
+              --arg workflow_name "${RUN_NAME}" \
+              --arg conclusion "${CONCLUSION}" \
+              --arg started_at "${STARTED}" \
+              --arg completed_at "${COMPLETED}" \
+              --argjson passed "${PASSED}" \
+              --argjson failed "${FAILED}" \
+              --argjson skipped "${SKIPPED}" \
+              --argjson coverage "${COVERAGE}" \
+              --argjson sast "${SAST}" \
+              '{
+                workflow_run_id: $run_id,
+                workflow_name: $workflow_name,
+                conclusion: $conclusion,
+                started_at: $started_at,
+                completed_at: $completed_at,
+                test_summary: { passed: $passed, failed: $failed, skipped: $skipped },
+                coverage_percent: $coverage,
+                sast_findings_count: $sast
+              }' > /tmp/ci_results.json
+          fi
+
+          echo "CI results:"
+          cat /tmp/ci_results.json
+
+      # ------------------------------------------------------------------
+      # 4. Get JIRA ticket details
+      # ------------------------------------------------------------------
+      - name: Get JIRA ticket details
+        id: jira
+        run: |
+          set -euo pipefail
+
+          PR_TITLE=$(jq -r '.title' /tmp/pr_meta.json)
+
+          # Extract JIRA ticket ID from PR title
+          JIRA_ID=$(echo "${PR_TITLE}" | grep -oE '[A-Z]+-[0-9]+' | head -1 || true)
+
+          if [ -z "${JIRA_ID}" ]; then
+            echo "WARNING: No JIRA ticket ID found in PR title '${PR_TITLE}'. Using placeholder."
+            cat > /tmp/jira.json <<'JSON'
+          {
+            "id": "UNKNOWN-0",
+            "summary": "No JIRA ticket linked",
+            "status": "unknown",
+            "assignee": null,
+            "reporter": "unknown",
+            "created_at": null,
+            "resolved_at": null,
+            "workflow_history": []
+          }
+          JSON
+          else
+            echo "Fetching JIRA ticket: ${JIRA_ID}"
+            JIRA_RESPONSE=$(curl -s -f \
+              -u "${JIRA_API_EMAIL}:${JIRA_API_TOKEN}" \
+              -H "Accept: application/json" \
+              "${JIRA_BASE_URL}/rest/api/3/issue/${JIRA_ID}" \
+              2>/dev/null) || {
+                echo "ERROR: Failed to fetch JIRA ticket ${JIRA_ID}"
+                exit 1
+              }
+
+            # Fetch changelog (workflow history)
+            CHANGELOG=$(curl -s -f \
+              -u "${JIRA_API_EMAIL}:${JIRA_API_TOKEN}" \
+              -H "Accept: application/json" \
+              "${JIRA_BASE_URL}/rest/api/3/issue/${JIRA_ID}/changelog?maxResults=100" \
+              2>/dev/null) || CHANGELOG='{"values":[]}'
+
+            # Build workflow_history array from changelog items where field == "status"
+            WORKFLOW_HISTORY=$(echo "${CHANGELOG}" | jq '[
+              .values[]
+              | . as $entry
+              | .items[]
+              | select(.field == "status")
+              | {
+                  status: .toString,
+                  transitioned_at: $entry.created,
+                  transitioned_by: ($entry.author.displayName // $entry.author.name // "unknown")
+                }
+            ]')
+
+            RESOLVED_AT=$(echo "${JIRA_RESPONSE}" | jq -r '.fields.resolutiondate // null')
+            ASSIGNEE=$(echo "${JIRA_RESPONSE}" | jq -r '.fields.assignee.displayName // null')
+            REPORTER=$(echo "${JIRA_RESPONSE}" | jq -r '.fields.reporter.displayName // "unknown"')
+            STATUS=$(echo "${JIRA_RESPONSE}" | jq -r '.fields.status.name // "unknown"')
+            SUMMARY=$(echo "${JIRA_RESPONSE}" | jq -r '.fields.summary // ""')
+            CREATED=$(echo "${JIRA_RESPONSE}" | jq -r '.fields.created // null')
+
+            jq -n \
+              --arg id "${JIRA_ID}" \
+              --arg summary "${SUMMARY}" \
+              --arg status "${STATUS}" \
+              --argjson assignee "$([ "${ASSIGNEE}" = "null" ] && echo "null" || echo "\"${ASSIGNEE}\"")" \
+              --arg reporter "${REPORTER}" \
+              --argjson created_at "$([ "${CREATED}" = "null" ] && echo "null" || echo "\"${CREATED}\"")" \
+              --argjson resolved_at "$([ "${RESOLVED_AT}" = "null" ] && echo "null" || echo "\"${RESOLVED_AT}\"")" \
+              --argjson workflow_history "${WORKFLOW_HISTORY}" \
+              '{
+                id: $id,
+                summary: $summary,
+                status: $status,
+                assignee: $assignee,
+                reporter: $reporter,
+                created_at: $created_at,
+                resolved_at: $resolved_at,
+                workflow_history: $workflow_history
+              }' > /tmp/jira.json
+          fi
+
+          echo "JIRA data collected:"
+          cat /tmp/jira.json
+
+      # ------------------------------------------------------------------
+      # 5. Get PR reviews
+      # ------------------------------------------------------------------
+      - name: Get PR reviews
+        id: reviews
+        run: |
+          set -euo pipefail
+          PR_NUMBER="${{ steps.pr_meta.outputs.pr_number }}"
+
+          gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}/reviews" \
+            --jq '[.[] | {
+              reviewer: .user.login,
+              submitted_at: .submitted_at,
+              state: (.state | ascii_downcase),
+              body_excerpt: (if .body then .body[0:500] else null end)
+            }]' > /tmp/reviews.json
+
+          echo "Reviews collected:"
+          cat /tmp/reviews.json
+
+      # ------------------------------------------------------------------
+      # 6. Get commits in this PR
+      # ------------------------------------------------------------------
+      - name: Get PR commits
+        id: commits
+        run: |
+          set -euo pipefail
+          PR_NUMBER="${{ steps.pr_meta.outputs.pr_number }}"
+
+          gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}/commits?per_page=100" \
+            --jq '[.[] | {
+              sha: .sha,
+              author: (.author.login // .commit.author.name // "unknown"),
+              message: .commit.message,
+              timestamp: .commit.author.date
+            }]' > /tmp/commits.json
+
+          echo "Commits collected:"
+          cat /tmp/commits.json
+
+      # ------------------------------------------------------------------
+      # 7. Build the complete evidence JSON record
+      # ------------------------------------------------------------------
+      - name: Build evidence record
+        id: build_record
+        run: |
+          set -euo pipefail
+
+          RECORD_ID=$(cat /proc/sys/kernel/random/uuid)
+          GENERATED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          RELEASE_TAG="${{ steps.pr_meta.outputs.release_tag }}"
+
+          # Build approvals array from approved reviews
+          APPROVALS=$(jq '[.[] | select(.state == "approved") | {
+            approver: .reviewer,
+            role: "Reviewer",
+            approved_at: .submitted_at,
+            approval_method: "github_review",
+            artifact_ref: null
+          }]' /tmp/reviews.json)
+
+          # Build traceability stubs (extend as needed)
+          JIRA_ID=$(jq -r '.id' /tmp/jira.json)
+          TRACEABILITY=$(jq -n \
+            --arg jira_id "${JIRA_ID}" \
+            '{ requirements: [$jira_id], design_docs: [], test_cases: [] }')
+
+          # Build standard_compliance stubs (extend with project-specific mappings)
+          STANDARD_COMPLIANCE=$(jq -n '{
+            iec_62304_clauses: ["5.1.6","5.5","5.6","5.7","5.8","7"],
+            iso_26262_clauses: ["6.4.6","6.4.7","6.4.8","6.4.11"],
+            do_178c_objectives: ["A-4.1","A-5.1","A-7.1","A-7.2","A-7.3"]
+          }')
+
+          # Assemble full record (integrity.sha256_hash filled in next step)
+          jq -n \
+            --arg schema_version "1.0.0" \
+            --arg record_id "${RECORD_ID}" \
+            --arg generated_at "${GENERATED_AT}" \
+            --arg release_tag "${RELEASE_TAG}" \
+            --slurpfile jira_ticket /tmp/jira.json \
+            --slurpfile github_pr /tmp/pr_meta.json \
+            --slurpfile reviews /tmp/reviews.json \
+            --slurpfile ci_results /tmp/ci_results.json \
+            --slurpfile commits /tmp/commits.json \
+            --argjson approvals "${APPROVALS}" \
+            --argjson traceability "${TRACEABILITY}" \
+            --argjson standard_compliance "${STANDARD_COMPLIANCE}" \
+            '{
+              schema_version: $schema_version,
+              record_id: $record_id,
+              generated_at: $generated_at,
+              release_tag: $release_tag,
+              jira_ticket: $jira_ticket[0],
+              github_pr: $github_pr[0],
+              reviews: $reviews[0],
+              ci_results: $ci_results[0],
+              commits: $commits[0],
+              approvals: $approvals,
+              traceability: $traceability,
+              standard_compliance: $standard_compliance,
+              integrity: {
+                sha256_hash: "PLACEHOLDER",
+                signed_by: null,
+                signature_timestamp: null
+              }
+            }' > /tmp/evidence_record_unsigned.json
+
+          echo "Evidence record assembled (pre-hash)."
+
+      # ------------------------------------------------------------------
+      # 7b. Calculate SHA-256 hash of the evidence record
+      # ------------------------------------------------------------------
+      - name: Calculate SHA-256 hash
+        id: hash
+        run: |
+          set -euo pipefail
+
+          # Canonicalise JSON (sorted keys, no whitespace) before hashing
+          # to produce a stable digest regardless of field ordering.
+          python3 - <<'PYEOF'
+          import json, hashlib, sys
+
+          with open('/tmp/evidence_record_unsigned.json') as f:
+              record = json.load(f)
+
+          # Remove integrity field for hashing
+          record_for_hash = {k: v for k, v in record.items() if k != 'integrity'}
+          canonical = json.dumps(record_for_hash, sort_keys=True, separators=(',', ':'), ensure_ascii=True)
+          digest = hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+
+          # Write the final signed record
+          record['integrity']['sha256_hash'] = digest
+          record['integrity']['signed_by'] = 'github-actions[bot]'
+          record['integrity']['signature_timestamp'] = record['generated_at']
+
+          with open('/tmp/evidence_record.json', 'w') as f:
+              json.dump(record, f, indent=2, sort_keys=True)
+
+          print(f"SHA-256: {digest}")
+          with open('/tmp/sha256.txt', 'w') as f:
+              f.write(digest)
+          PYEOF
+
+          SHA256=$(cat /tmp/sha256.txt)
+          echo "sha256=${SHA256}" >> "$GITHUB_OUTPUT"
+          echo "Evidence record SHA-256: ${SHA256}"
+
+          # Determine output filename
+          PR_NUMBER="${{ steps.pr_meta.outputs.pr_number }}"
+          RELEASE_TAG="${{ steps.pr_meta.outputs.release_tag }}"
+          EVIDENCE_FILENAME="evidence-pr${PR_NUMBER}-${RELEASE_TAG}.json"
+          # Sanitise tag for filesystem use
+          EVIDENCE_FILENAME=$(echo "${EVIDENCE_FILENAME}" | tr '/' '-')
+          cp /tmp/evidence_record.json "/tmp/${EVIDENCE_FILENAME}"
+          echo "evidence_filename=${EVIDENCE_FILENAME}" >> "$GITHUB_OUTPUT"
+          echo "evidence_path=/tmp/${EVIDENCE_FILENAME}" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------------
+      # 8. Upload evidence record as GitHub Actions artifact (~7 years)
+      # ------------------------------------------------------------------
+      - name: Upload evidence record artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: certification-evidence-pr${{ steps.pr_meta.outputs.pr_number }}
+          path: ${{ steps.hash.outputs.evidence_path }}
+          retention-days: 2555
+          if-no-files-found: error
+
+      # ------------------------------------------------------------------
+      # 9. Upload to S3 if bucket is configured
+      # ------------------------------------------------------------------
+      - name: Configure AWS credentials
+        if: env.S3_BUCKET != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.S3_REGION }}
+
+      - name: Upload evidence record to S3
+        if: env.S3_BUCKET != ''
+        run: |
+          set -euo pipefail
+          EVIDENCE_PATH="${{ steps.hash.outputs.evidence_path }}"
+          EVIDENCE_FILENAME="${{ steps.hash.outputs.evidence_filename }}"
+          RELEASE_TAG="${{ steps.pr_meta.outputs.release_tag }}"
+          PR_NUMBER="${{ steps.pr_meta.outputs.pr_number }}"
+          REPO="${{ github.repository }}"
+
+          # Store under: s3://BUCKET/evidence/REPO/RELEASE_TAG/FILENAME
+          S3_KEY="evidence/${REPO}/${RELEASE_TAG}/${EVIDENCE_FILENAME}"
+
+          aws s3 cp "${EVIDENCE_PATH}" "s3://${S3_BUCKET}/${S3_KEY}" \
+            --metadata "pr-number=${PR_NUMBER},release-tag=${RELEASE_TAG},sha256=${{ steps.hash.outputs.sha256 }}" \
+            --no-progress
+
+          echo "Uploaded to s3://${S3_BUCKET}/${S3_KEY}"
+          echo "S3_URI=s3://${S3_BUCKET}/${S3_KEY}" >> "$GITHUB_ENV"
+
+      # ------------------------------------------------------------------
+      # Write workflow summary
+      # ------------------------------------------------------------------
+      - name: Write job summary
+        if: always()
+        run: |
+          set -euo pipefail
+          PR_NUMBER="${{ steps.pr_meta.outputs.pr_number }}"
+          RELEASE_TAG="${{ steps.pr_meta.outputs.release_tag }}"
+          SHA256="${{ steps.hash.outputs.sha256 }}"
+          EVIDENCE_FILENAME="${{ steps.hash.outputs.evidence_filename }}"
+
+          cat >> "$GITHUB_STEP_SUMMARY" <<SUMMARY
+          ## Certification Evidence Record
+
+          | Field | Value |
+          |---|---|
+          | PR Number | #${PR_NUMBER} |
+          | Release Tag | \`${RELEASE_TAG}\` |
+          | Evidence File | \`${EVIDENCE_FILENAME}\` |
+          | SHA-256 | \`${SHA256}\` |
+          | Artifact Retention | 2555 days (~7 years) |
+          | S3 URI | \`${S3_URI:-not configured}\` |
+
+          The evidence record has been uploaded as a GitHub Actions artifact named
+          \`certification-evidence-pr${PR_NUMBER}\` and is retained for ~7 years.
+
+          To verify integrity:
+          \`\`\`bash
+          # Download the artifact, then:
+          python3 -c "
+          import json, hashlib
+          with open('${EVIDENCE_FILENAME}') as f:
+              record = json.load(f)
+          stored_hash = record['integrity']['sha256_hash']
+          record_for_hash = {k: v for k, v in record.items() if k != 'integrity'}
+          canonical = json.dumps(record_for_hash, sort_keys=True, separators=(',', ':'), ensure_ascii=True)
+          computed = hashlib.sha256(canonical.encode()).hexdigest()
+          print('PASS' if stored_hash == computed else 'FAIL', computed)
+          "
+          \`\`\`
+          SUMMARY

@@ -1,0 +1,245 @@
+# =============================================================================
+# docker-compose.yml
+# Production-ready n8n CE deployment for JIRA + GitHub CI/CD
+# certification evidence automation system.
+#
+# Services:
+#   - n8n:      Workflow automation engine (Community Edition)
+#   - postgres:  Persistent workflow/credential storage (PostgreSQL 15)
+#   - nginx:     Reverse proxy with HTTPS termination (Let's Encrypt)
+#
+# Usage:
+#   cp .env.example .env        # fill in real secrets
+#   docker-compose up -d
+# =============================================================================
+
+version: "3.9"
+
+# ---------------------------------------------------------------------------
+# Named volumes — data survives container restarts and upgrades
+# ---------------------------------------------------------------------------
+volumes:
+  n8n_data:          # n8n local file storage (e.g. binary attachments)
+  postgres_data:     # PostgreSQL WAL + data files
+  nginx_certs:       # Let's Encrypt certificates managed by certbot
+  nginx_html:        # certbot webroot for ACME challenges
+
+# ---------------------------------------------------------------------------
+# Isolated network — only nginx is exposed to the host
+# ---------------------------------------------------------------------------
+networks:
+  certification_net:
+    driver: bridge
+
+services:
+
+  # =========================================================================
+  # PostgreSQL 15
+  # Stores n8n workflows, credentials, execution history, and tags.
+  # =========================================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: n8n_postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-n8n}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: ${POSTGRES_DB:-n8n}
+      # Tune shared_buffers for small-to-medium workloads
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=en_US.UTF-8"
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+    networks:
+      - certification_net
+
+    # Health check — n8n will not start until postgres is ready
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-n8n} -d ${POSTGRES_DB:-n8n}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+    # Resource limits — adjust for your host
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.50"
+        reservations:
+          memory: 256M
+          cpus: "0.10"
+
+    # Never log passwords in plain text
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # =========================================================================
+  # n8n Community Edition
+  # Runs the workflow engine that handles JIRA <-> GitHub synchronisation.
+  # =========================================================================
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n_app
+    restart: unless-stopped
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    environment:
+      # --- Database ---
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB:-n8n}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER:-n8n}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+
+      # --- n8n core ---
+      N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: https
+      WEBHOOK_URL: https://${N8N_HOST:-localhost}/
+
+      # --- Basic Auth (protect the n8n UI) ---
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER:?N8N_BASIC_AUTH_USER must be set}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD:?N8N_BASIC_AUTH_PASSWORD must be set}
+
+      # --- Execution settings ---
+      EXECUTIONS_DATA_SAVE_ON_ERROR: all
+      EXECUTIONS_DATA_SAVE_ON_SUCCESS: all
+      EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS: "true"
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: 720          # hours (30 days)
+
+      # --- Timezone ---
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-UTC}
+      TZ: ${GENERIC_TIMEZONE:-UTC}
+
+      # --- JIRA integration (available as env vars inside n8n expressions) ---
+      JIRA_API_URL: ${JIRA_API_URL:?JIRA_API_URL must be set}
+      JIRA_API_TOKEN: ${JIRA_API_TOKEN:?JIRA_API_TOKEN must be set}
+      JIRA_USER_EMAIL: ${JIRA_USER_EMAIL:?JIRA_USER_EMAIL must be set}
+
+      # --- GitHub integration ---
+      GITHUB_TOKEN: ${GITHUB_TOKEN:?GITHUB_TOKEN must be set}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?GITHUB_WEBHOOK_SECRET must be set}
+      GITHUB_OWNER: ${GITHUB_OWNER:-your-org}
+      GITHUB_REPO: ${GITHUB_REPO:-your-repo}
+
+      # --- Encryption key (generate once, keep stable across restarts) ---
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?N8N_ENCRYPTION_KEY must be set}
+
+      # --- Logging ---
+      N8N_LOG_LEVEL: ${N8N_LOG_LEVEL:-info}
+      N8N_LOG_OUTPUT: console
+
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+    networks:
+      - certification_net
+
+    # n8n is not exposed directly to the host; nginx proxies it
+    expose:
+      - "5678"
+
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5678/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.00"
+        reservations:
+          memory: 512M
+          cpus: "0.25"
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # =========================================================================
+  # nginx
+  # Terminates TLS (Let's Encrypt) and reverse-proxies to n8n.
+  # Certificate renewal is handled by the certbot companion; mount the
+  # nginx/conf.d/ directory and drop in your server block.
+  #
+  # PLACEHOLDER CONFIG — replace with real domain and certificate paths
+  # before going to production (see n8n-setup-guide.md for details).
+  # =========================================================================
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: n8n_nginx
+    restart: unless-stopped
+
+    depends_on:
+      n8n:
+        condition: service_healthy
+
+    ports:
+      - "80:80"      # ACME HTTP-01 challenge + HTTP→HTTPS redirect
+      - "443:443"    # HTTPS traffic
+
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro   # drop your server block here
+      - nginx_certs:/etc/letsencrypt:ro        # populated by certbot
+      - nginx_html:/var/www/certbot:ro         # ACME webroot
+
+    networks:
+      - certification_net
+
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # =========================================================================
+  # certbot (Let's Encrypt certificate renewal)
+  # Runs once to obtain/renew certificates and then exits.
+  # Add a cron job on the host that runs:
+  #   docker-compose run --rm certbot renew
+  # every 12 hours, or use the --keep-until-expiring flag.
+  # =========================================================================
+  certbot:
+    image: certbot/certbot:latest
+    container_name: n8n_certbot
+    restart: "no"
+
+    volumes:
+      - nginx_certs:/etc/letsencrypt
+      - nginx_html:/var/www/certbot
+
+    # Replace <your-email> and <your-domain> before first run
+    command: >
+      certonly --webroot
+      --webroot-path=/var/www/certbot
+      --email ${CERTBOT_EMAIL:-admin@example.com}
+      --agree-tos
+      --no-eff-email
+      -d ${N8N_HOST:-n8n.example.com}
+
+    networks:
+      - certification_net

@@ -1,0 +1,410 @@
+{
+  "name": "GitHub → JIRA Sync (Certification Evidence)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "github-webhook",
+        "responseMode": "onReceived",
+        "responseData": "firstEntryJson",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "node-webhook-github",
+      "name": "GitHub Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "webhookId": "github-to-jira-webhook",
+      "notes": "Receives GitHub webhook events. Register this URL in GitHub repo Settings → Webhooks. Subscribe to: pull_request, pull_request_review, check_suite, push. Set Content-Type to application/json and use GITHUB_WEBHOOK_SECRET."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---------------------------------------------------------------------------\n// Validate GitHub webhook HMAC-SHA256 signature.\n// n8n does not natively verify signatures, so we do it here.\n// If validation fails the workflow exits early with a 401 log.\n//\n// NOTE: In production, pair this with an nginx rule that only allows\n// requests from GitHub's published IP ranges (meta.github.com).\n// ---------------------------------------------------------------------------\nconst crypto = require('crypto');\n\nconst secret    = $env.GITHUB_WEBHOOK_SECRET || '';\nconst rawBody   = $input.first().json._rawBody || '';\nconst sigHeader = $input.first().json.headers?.['x-hub-signature-256'] || '';\n\nif (secret && sigHeader) {\n  const hmac     = crypto.createHmac('sha256', secret);\n  hmac.update(rawBody);\n  const expected = 'sha256=' + hmac.digest('hex');\n  if (!crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(sigHeader))) {\n    throw new Error('GitHub webhook signature mismatch — request rejected');\n  }\n}\n\n// Pass the parsed body forward\nconst body  = $input.first().json;\nconst event = body.headers?.['x-github-event'] || body['x-github-event'] || 'unknown';\n\nreturn [{ json: { ...body, _githubEvent: event } }];"
+      },
+      "id": "node-verify-signature",
+      "name": "Verify GitHub Signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---------------------------------------------------------------------------\n// Extract key fields from the GitHub payload and resolve the JIRA ticket.\n//\n// Convention: JIRA ticket ID appears in the PR title or body as [A-Z]+-\\d+\n// e.g.  \"feat: add retry logic [CERT-123]\"  or  \"Fixes CERT-456\"\n//\n// Retry note: this node is idempotent; n8n's built-in retry (max 3 attempts,\n// exponential back-off) handles transient failures on the HTTP nodes below.\n// ---------------------------------------------------------------------------\nconst body  = $input.first().json;\nconst event = body._githubEvent;\n\n// Pull Request events\nconst pr       = body.pull_request || {};\nconst prNumber = pr.number         || body.number        || null;\nconst prTitle  = pr.title          || '';\nconst prBody   = pr.body           || '';\nconst prUrl    = pr.html_url       || '';\nconst prAction = body.action       || '';\nconst headSha  = pr.head?.sha      || body.after          || '';\nconst baseBranch = pr.base?.ref    || '';\nconst headBranch = pr.head?.ref    || '';\n\n// Pull Request Review events\nconst review         = body.review || {};\nconst reviewState    = review.state       || '';   // approved | changes_requested | commented\nconst reviewerLogin  = review.user?.login || '';\nconst reviewBody     = review.body        || '';\n\n// Check Suite events\nconst checkSuite        = body.check_suite || {};\nconst checkSuiteStatus  = checkSuite.status     || '';\nconst checkSuiteConclusion = checkSuite.conclusion || '';\nconst checkSuiteApp     = checkSuite.app?.name   || '';\n\n// Repository\nconst repoFullName = body.repository?.full_name || `${$env.GITHUB_OWNER}/${$env.GITHUB_REPO}`;\nconst [repoOwner, repoName] = repoFullName.split('/');\n\n// Extract JIRA ticket ID from PR title then body (first match wins)\nconst jiraRegex  = /([A-Z][A-Z0-9_]+-\\d+)/g;\nconst titleMatch = prTitle.match(jiraRegex);\nconst bodyMatch  = prBody.match(jiraRegex);\nconst jiraTicket = (titleMatch?.[0] || bodyMatch?.[0] || '').toUpperCase();\n\n// Requester\nconst senderLogin = body.sender?.login || 'unknown';\n\nreturn [{\n  json: {\n    _githubEvent:          event,\n    prNumber,\n    prTitle,\n    prUrl,\n    prAction,\n    headSha,\n    baseBranch,\n    headBranch,\n    reviewState,\n    reviewerLogin,\n    reviewBody,\n    checkSuiteStatus,\n    checkSuiteConclusion,\n    checkSuiteApp,\n    repoOwner,\n    repoName,\n    repoFullName,\n    jiraTicket,\n    senderLogin\n  }\n}];"
+      },
+      "id": "node-extract-github",
+      "name": "Extract GitHub Fields + JIRA Ticket",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.jiraTicket }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "id": "node-check-jira-ticket",
+      "name": "Has JIRA Ticket?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [900, 300],
+      "notes": "Only proceed if a JIRA ticket ID was found in the PR title or body."
+    },
+    {
+      "parameters": {
+        "rules": {
+          "rules": [
+            {
+              "value2": "pull_request:opened",
+              "outputKey": "pr_opened"
+            },
+            {
+              "value2": "pull_request:closed_merged",
+              "outputKey": "pr_merged"
+            },
+            {
+              "value2": "pull_request_review:submitted",
+              "outputKey": "pr_reviewed"
+            },
+            {
+              "value2": "check_suite:completed",
+              "outputKey": "check_suite_completed"
+            }
+          ]
+        },
+        "fallbackOutput": "none",
+        "dataPropertyName": "={{ $json._githubEvent === 'pull_request' ? ('pull_request:' + ($json.prAction === 'closed' && $json.pull_request?.merged ? 'closed_merged' : $json.prAction)) : ($json._githubEvent === 'pull_request_review' ? 'pull_request_review:' + $json.prAction : $json._githubEvent + ':' + $json.checkSuiteStatus) }}"
+      },
+      "id": "node-switch-event",
+      "name": "Route by GitHub Event",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [1120, 300],
+      "notes": "Routes to the appropriate JIRA transition based on the GitHub event type and action combination."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.JIRA_API_URL }}/rest/api/3/issue/{{ $json.jiraTicket }}/transitions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Basic {{ Buffer.from($env.JIRA_USER_EMAIL + ':' + $env.JIRA_API_TOKEN).toString('base64') }}" },
+            { "name": "Content-Type",  "value": "application/json" },
+            { "name": "Accept",        "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "transition",
+              "value": "={ \"id\": \"{{ $env.JIRA_TRANSITION_IN_REVIEW || '31' }}\" }"
+            }
+          ]
+        },
+        "options": {
+          "retry": {
+            "enabled": true,
+            "maxTries": 3,
+            "waitBetweenTries": 2000
+          }
+        }
+      },
+      "id": "node-jira-transition-in-review",
+      "name": "JIRA: Transition → In Review",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1360, 120],
+      "notes": "Moves the JIRA issue to 'In Review'. Set JIRA_TRANSITION_IN_REVIEW env var to your actual transition ID (find via GET /rest/api/3/issue/{key}/transitions)."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.JIRA_API_URL }}/rest/api/3/issue/{{ $json.jiraTicket }}/comment",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Basic {{ Buffer.from($env.JIRA_USER_EMAIL + ':' + $env.JIRA_API_TOKEN).toString('base64') }}" },
+            { "name": "Content-Type",  "value": "application/json" },
+            { "name": "Accept",        "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "body",
+              "value": "={\n  \"version\": 1,\n  \"type\": \"doc\",\n  \"content\": [\n    {\n      \"type\": \"paragraph\",\n      \"content\": [\n        { \"type\": \"text\", \"text\": \"GitHub PR #{{ $json.prNumber }} opened by \", \"marks\": [] },\n        { \"type\": \"text\", \"text\": \"{{ $json.senderLogin }}\", \"marks\": [{ \"type\": \"strong\" }] },\n        { \"type\": \"text\", \"text\": \": \" },\n        { \"type\": \"text\", \"text\": \"{{ $json.prTitle }}\", \"marks\": [{ \"type\": \"em\" }] }\n      ]\n    },\n    {\n      \"type\": \"paragraph\",\n      \"content\": [\n        { \"type\": \"text\", \"text\": \"PR URL: \" },\n        { \"type\": \"text\", \"text\": \"{{ $json.prUrl }}\", \"marks\": [{ \"type\": \"link\", \"attrs\": { \"href\": \"{{ $json.prUrl }}\" } }] }\n      ]\n    }\n  ]\n}"
+            }
+          ]
+        },
+        "options": {
+          "retry": { "enabled": true, "maxTries": 3, "waitBetweenTries": 2000 }
+        }
+      },
+      "id": "node-jira-comment-pr-opened",
+      "name": "JIRA: Comment — PR Opened",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1580, 120],
+      "notes": "Posts an Atlassian Document Format (ADF) comment to the JIRA issue with the PR link and author."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.JIRA_API_URL }}/rest/api/3/issue/{{ $json.jiraTicket }}/transitions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Basic {{ Buffer.from($env.JIRA_USER_EMAIL + ':' + $env.JIRA_API_TOKEN).toString('base64') }}" },
+            { "name": "Content-Type",  "value": "application/json" },
+            { "name": "Accept",        "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "transition",
+              "value": "={ \"id\": \"{{ $env.JIRA_TRANSITION_DONE || '41' }}\" }"
+            }
+          ]
+        },
+        "options": {
+          "retry": { "enabled": true, "maxTries": 3, "waitBetweenTries": 2000 }
+        }
+      },
+      "id": "node-jira-transition-done",
+      "name": "JIRA: Transition → Done",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1360, 260]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.JIRA_API_URL }}/rest/api/3/issue/{{ $json.jiraTicket }}/comment",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Basic {{ Buffer.from($env.JIRA_USER_EMAIL + ':' + $env.JIRA_API_TOKEN).toString('base64') }}" },
+            { "name": "Content-Type",  "value": "application/json" },
+            { "name": "Accept",        "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "body",
+              "value": "={\n  \"version\": 1,\n  \"type\": \"doc\",\n  \"content\": [\n    {\n      \"type\": \"paragraph\",\n      \"content\": [\n        { \"type\": \"text\", \"text\": \"PR #{{ $json.prNumber }} merged by \", \"marks\": [] },\n        { \"type\": \"text\", \"text\": \"{{ $json.senderLogin }}\", \"marks\": [{ \"type\": \"strong\" }] },\n        { \"type\": \"text\", \"text\": \". Branch: {{ $json.headBranch }} → {{ $json.baseBranch }}.\" }\n      ]\n    },\n    {\n      \"type\": \"paragraph\",\n      \"content\": [\n        { \"type\": \"text\", \"text\": \"PR URL: \" },\n        { \"type\": \"text\", \"text\": \"{{ $json.prUrl }}\", \"marks\": [{ \"type\": \"link\", \"attrs\": { \"href\": \"{{ $json.prUrl }}\" } }] }\n      ]\n    }\n  ]\n}"
+            }
+          ]
+        },
+        "options": {
+          "retry": { "enabled": true, "maxTries": 3, "waitBetweenTries": 2000 }
+        }
+      },
+      "id": "node-jira-comment-pr-merged",
+      "name": "JIRA: Comment — PR Merged",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1580, 260]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.JIRA_API_URL }}/rest/api/3/issue/{{ $json.jiraTicket }}/comment",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Basic {{ Buffer.from($env.JIRA_USER_EMAIL + ':' + $env.JIRA_API_TOKEN).toString('base64') }}" },
+            { "name": "Content-Type",  "value": "application/json" },
+            { "name": "Accept",        "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "body",
+              "value": "={\n  \"version\": 1,\n  \"type\": \"doc\",\n  \"content\": [\n    {\n      \"type\": \"paragraph\",\n      \"content\": [\n        { \"type\": \"text\", \"text\": \"PR #{{ $json.prNumber }} reviewed by \", \"marks\": [] },\n        { \"type\": \"text\", \"text\": \"{{ $json.reviewerLogin }}\", \"marks\": [{ \"type\": \"strong\" }] },\n        { \"type\": \"text\", \"text\": \" — verdict: \" },\n        { \"type\": \"text\", \"text\": \"{{ $json.reviewState.toUpperCase() }}\", \"marks\": [{ \"type\": \"strong\" }] }\n      ]\n    },\n    {\n      \"type\": \"paragraph\",\n      \"content\": [\n        { \"type\": \"text\", \"text\": \"Reviewer comment: {{ $json.reviewBody || '(no comment)' }}\" }\n      ]\n    },\n    {\n      \"type\": \"paragraph\",\n      \"content\": [\n        { \"type\": \"text\", \"text\": \"PR URL: \" },\n        { \"type\": \"text\", \"text\": \"{{ $json.prUrl }}\", \"marks\": [{ \"type\": \"link\", \"attrs\": { \"href\": \"{{ $json.prUrl }}\" } }] }\n      ]\n    }\n  ]\n}"
+            }
+          ]
+        },
+        "options": {
+          "retry": { "enabled": true, "maxTries": 3, "waitBetweenTries": 2000 }
+        }
+      },
+      "id": "node-jira-comment-review",
+      "name": "JIRA: Comment — PR Review",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1360, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.JIRA_API_URL }}/rest/api/3/issue/{{ $json.jiraTicket }}/comment",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Basic {{ Buffer.from($env.JIRA_USER_EMAIL + ':' + $env.JIRA_API_TOKEN).toString('base64') }}" },
+            { "name": "Content-Type",  "value": "application/json" },
+            { "name": "Accept",        "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "body",
+              "value": "={\n  \"version\": 1,\n  \"type\": \"doc\",\n  \"content\": [\n    {\n      \"type\": \"paragraph\",\n      \"content\": [\n        { \"type\": \"text\", \"text\": \"CI check suite '{{ $json.checkSuiteApp }}' completed for PR #{{ $json.prNumber }}: \" },\n        { \"type\": \"text\", \"text\": \"{{ $json.checkSuiteConclusion.toUpperCase() }}\", \"marks\": [{ \"type\": \"strong\" }] }\n      ]\n    }\n  ]\n}"
+            }
+          ]
+        },
+        "options": {
+          "retry": { "enabled": true, "maxTries": 3, "waitBetweenTries": 2000 }
+        }
+      },
+      "id": "node-jira-comment-check",
+      "name": "JIRA: Comment — CI Check",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1360, 540]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---------------------------------------------------------------------------\n// Structured log entry — emitted after every successful JIRA update.\n// ---------------------------------------------------------------------------\nconst now  = new Date().toISOString();\nconst item = $input.first().json;\n\nconst logEntry = {\n  timestamp:   now,\n  source:      'github-to-jira-sync',\n  github_event: item._githubEvent,\n  github_pr:   item.prNumber   || 'N/A',\n  jira_ticket: item.jiraTicket || 'N/A',\n  action:      `${item._githubEvent}:${item.prAction || item.reviewState || item.checkSuiteConclusion}`,\n  user:        item.reviewerLogin || item.senderLogin || 'unknown',\n  repo:        item.repoFullName  || 'unknown',\n  level:       'INFO'\n};\n\nconsole.log(JSON.stringify(logEntry));\nreturn [{ json: logEntry }];"
+      },
+      "id": "node-log-success",
+      "name": "Structured Log (Success)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1800, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// No JIRA ticket found — log and exit cleanly.\nconst item = $input.first().json;\nconsole.log(JSON.stringify({\n  timestamp:    new Date().toISOString(),\n  source:       'github-to-jira-sync',\n  level:        'WARN',\n  message:      'No JIRA ticket ID in PR title/body — skipping',\n  github_event: item._githubEvent,\n  github_pr:    item.prNumber,\n  pr_title:     item.prTitle\n}));\nreturn [{ json: { skipped: true, reason: 'no_jira_ticket', prNumber: item.prNumber } }];"
+      },
+      "id": "node-noop-no-ticket",
+      "name": "No-op: No JIRA Ticket",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 480]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Unhandled event type — log and exit cleanly.\nconst item = $input.first().json;\nconsole.log(JSON.stringify({\n  timestamp:    new Date().toISOString(),\n  source:       'github-to-jira-sync',\n  level:        'DEBUG',\n  message:      'Unhandled GitHub event/action combination — no JIRA action taken',\n  github_event: item._githubEvent,\n  pr_action:    item.prAction\n}));\nreturn [{ json: { skipped: true, reason: 'unhandled_event', event: item._githubEvent } }];"
+      },
+      "id": "node-noop-unhandled",
+      "name": "No-op: Unhandled Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1360, 660]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---------------------------------------------------------------------------\n// Error handler — catches failures from any upstream node.\n// Retry note: n8n retries HTTP nodes up to 3 times (configured per node).\n// If all retries fail, execution reaches here.\n// ---------------------------------------------------------------------------\nconst error = $input.first().json;\nconsole.error(JSON.stringify({\n  timestamp: new Date().toISOString(),\n  source:    'github-to-jira-sync',\n  level:     'ERROR',\n  message:   error.message || 'Unknown error',\n  node:      error.node    || 'unknown',\n  details:   error\n}));\nthrow new Error(`[github-to-jira-sync] ${error.message || 'Workflow error'}`);"
+      },
+      "id": "node-error-handler",
+      "name": "Error Handler",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 620]
+    }
+  ],
+  "connections": {
+    "GitHub Webhook": {
+      "main": [
+        [{ "node": "Verify GitHub Signature", "type": "main", "index": 0 }]
+      ]
+    },
+    "Verify GitHub Signature": {
+      "main": [
+        [{ "node": "Extract GitHub Fields + JIRA Ticket", "type": "main", "index": 0 }]
+      ]
+    },
+    "Extract GitHub Fields + JIRA Ticket": {
+      "main": [
+        [{ "node": "Has JIRA Ticket?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Has JIRA Ticket?": {
+      "main": [
+        [{ "node": "Route by GitHub Event",  "type": "main", "index": 0 }],
+        [{ "node": "No-op: No JIRA Ticket",  "type": "main", "index": 0 }]
+      ]
+    },
+    "Route by GitHub Event": {
+      "main": [
+        [{ "node": "JIRA: Transition → In Review",  "type": "main", "index": 0 }],
+        [{ "node": "JIRA: Transition → Done",        "type": "main", "index": 0 }],
+        [{ "node": "JIRA: Comment — PR Review",      "type": "main", "index": 0 }],
+        [{ "node": "JIRA: Comment — CI Check",       "type": "main", "index": 0 }],
+        [{ "node": "No-op: Unhandled Event",         "type": "main", "index": 0 }]
+      ]
+    },
+    "JIRA: Transition → In Review": {
+      "main": [
+        [{ "node": "JIRA: Comment — PR Opened", "type": "main", "index": 0 }]
+      ]
+    },
+    "JIRA: Comment — PR Opened": {
+      "main": [
+        [{ "node": "Structured Log (Success)", "type": "main", "index": 0 }]
+      ]
+    },
+    "JIRA: Transition → Done": {
+      "main": [
+        [{ "node": "JIRA: Comment — PR Merged", "type": "main", "index": 0 }]
+      ]
+    },
+    "JIRA: Comment — PR Merged": {
+      "main": [
+        [{ "node": "Structured Log (Success)", "type": "main", "index": 0 }]
+      ]
+    },
+    "JIRA: Comment — PR Review": {
+      "main": [
+        [{ "node": "Structured Log (Success)", "type": "main", "index": 0 }]
+      ]
+    },
+    "JIRA: Comment — CI Check": {
+      "main": [
+        [{ "node": "Structured Log (Success)", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "errorWorkflow": "node-error-handler"
+  },
+  "versionId": "1.0.0",
+  "id": "github-to-jira-sync",
+  "meta": {
+    "instanceId": "certification-automation"
+  },
+  "tags": [
+    { "name": "certification" },
+    { "name": "github" },
+    { "name": "jira" }
+  ]
+}
